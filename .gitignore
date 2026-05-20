@@ -135,3 +135,9 @@ Thumbs.db
 
 # Markdown files
 *.md
+
+# Image/Figure generation scripts
+create_architecture_diagram.py
+create_clahe_comparison.py
+generate_*.py
+plot_*.py

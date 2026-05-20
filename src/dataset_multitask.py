@@ -148,6 +148,28 @@ class CoronaryMultiTaskDataset(Dataset):
                 self._fill_annotation(mask, ann, 1)
         return mask
 
+    def estimate_anatomy_pixel_counts(self, num_classes=26, max_samples=None):
+        counts = np.zeros(num_classes, dtype=np.float64)
+        images = self.images if max_samples is None else self.images[:max_samples]
+        for info in images:
+            mask = self._build_anatomy_mask(info["file_name"], info["height"], info["width"])
+            ids, pix = np.unique(mask, return_counts=True)
+            for class_id, count in zip(ids, pix):
+                if 0 <= int(class_id) < num_classes:
+                    counts[int(class_id)] += float(count)
+        return counts
+
+    def estimate_stenosis_pixel_counts(self, max_samples=None):
+        positives = 0.0
+        total = 0.0
+        images = self.images if max_samples is None else self.images[:max_samples]
+        for info in images:
+            mask = self._build_stenosis_mask(info["file_name"], info["height"], info["width"])
+            positives += float(np.sum(mask > 0))
+            total += float(mask.size)
+        negatives = max(total - positives, 0.0)
+        return positives, negatives
+
     @staticmethod
     def _fill_annotation(mask, ann, value):
         for seg in ann.get("segmentation", []):

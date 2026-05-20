@@ -57,3 +57,40 @@ def segment_artery(segment_id: int) -> str:
     """Return the major artery family for a segment id."""
     meta = SYNTAX_SEGMENTS.get(int(segment_id))
     return "unknown" if meta is None else meta["artery"]
+
+
+ANATOMY_GROUPS = [
+    "background",
+    "RCA proximal",
+    "RCA mid",
+    "RCA distal",
+    "PDA",
+    "LM",
+    "LAD proximal",
+    "LAD mid",
+    "LAD distal",
+    "Diagonal",
+    "LCX proximal",
+    "OM/intermediate",
+    "LCX distal",
+    "PL branch",
+]
+
+ANATOMY_ARTERIES = [
+    "background",
+    "RCA",
+    "RCA/PDA",
+    "LM",
+    "LAD",
+    "LCX",
+    "LCX/PDA",
+]
+
+GROUP_TO_ID = {name: idx for idx, name in enumerate(ANATOMY_GROUPS)}
+ARTERY_TO_ID = {name: idx for idx, name in enumerate(ANATOMY_ARTERIES)}
+
+SEGMENT_TO_GROUP_ID = [0] * NUM_ANATOMY_CLASSES
+SEGMENT_TO_ARTERY_ID = [0] * NUM_ANATOMY_CLASSES
+for _segment_id, _meta in SYNTAX_SEGMENTS.items():
+    SEGMENT_TO_GROUP_ID[_segment_id] = GROUP_TO_ID[_meta["group"]]
+    SEGMENT_TO_ARTERY_ID[_segment_id] = ARTERY_TO_ID[_meta["artery"]]

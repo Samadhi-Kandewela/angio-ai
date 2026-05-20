@@ -1,0 +1,12 @@
+segmentation-models-pytorch
+torch
+torchvision
+opencv-python
+tqdm
+numpy
+streamlit
+onnxruntime
+imageio
+pillow
+PyQt5
+albumentations

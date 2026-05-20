@@ -7,10 +7,11 @@ from tqdm import tqdm
 import shutil
 
 # Paths
-ROOT_DIR = '/home/samadhi21eng055/Desktop/Research/Medical-Image-Segmentation-/dataset'
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.join(PROJECT_ROOT, 'dataset')
 DATASET_TYPE = 'syntax'
 SPLIT = 'train'
-OUTPUT_DIR = '/home/samadhi21eng055/Desktop/Research/Medical-Image-Segmentation-/dataset_augmented'
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'dataset_augmented')
 
 # Augmentation factor
 AUG_FACTOR = 5 # Create 5 new images per original image

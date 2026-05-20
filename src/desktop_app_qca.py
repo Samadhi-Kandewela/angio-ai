@@ -35,12 +35,12 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPalette, QIcon
 import cv2
 import numpy as np
 
-# Add project root to sys.path so we can import QCA_V1
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
-from QCA_V1 import (
+from qca import (
     QCAConfig, to_binary_mask, morph_cleanup, qca_from_mask, draw_overlay
 )
 
@@ -169,7 +169,7 @@ class VideoThread(QThread):
             return None, ""
 
     def run(self):
-        """Main loop: read frames → infer → QCA → emit."""
+        """Main loop: read frames, infer, run QCA, and emit UI frames."""
         if not self.video_path or not os.path.exists(self.video_path):
             self.error.emit(f"Video not found: {self.video_path}")
             self.finished.emit()
@@ -455,7 +455,7 @@ class MainWindow(QMainWindow):
         # ── Stenosis Info Bar ────────────────────────────────────────
         stenosis_box = QGroupBox("Stenosis Report")
         stenosis_layout = QHBoxLayout(stenosis_box)
-        self.lbl_stenosis = QLabel("No analysis yet — load a video and press Play")
+        self.lbl_stenosis = QLabel("No analysis yet - load a video and press Play")
         self.lbl_stenosis.setFont(QFont("Consolas", 12, QFont.Bold))
         self.lbl_stenosis.setStyleSheet("color: #FF6B6B; padding: 4px;")
         self.lbl_stenosis.setWordWrap(True)
@@ -466,12 +466,12 @@ class MainWindow(QMainWindow):
         metrics_layout = QHBoxLayout()
         metrics_layout.setSpacing(24)
 
-        self.lbl_fps = QLabel("FPS: —")
+        self.lbl_fps = QLabel("FPS: --")
         self.lbl_fps.setFont(QFont("Consolas", 15, QFont.Bold))
         self.lbl_fps.setStyleSheet("color: #00CC66;")
         metrics_layout.addWidget(self.lbl_fps)
 
-        self.lbl_latency = QLabel("Latency: — ms")
+        self.lbl_latency = QLabel("Latency: -- ms")
         self.lbl_latency.setFont(QFont("Consolas", 15, QFont.Bold))
         self.lbl_latency.setStyleSheet("color: #FFA657;")
         metrics_layout.addWidget(self.lbl_latency)
@@ -485,7 +485,7 @@ class MainWindow(QMainWindow):
         ctrl_layout.setSpacing(10)
 
         # Video file
-        self.btn_video = QPushButton("📂 Open Video")
+        self.btn_video = QPushButton("Open Video")
         self.btn_video.clicked.connect(self._browse_video)
         ctrl_layout.addWidget(self.btn_video)
 
@@ -496,7 +496,7 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.txt_video)
 
         # Model file (pre-filled with default)
-        self.btn_model = QPushButton("🧠 Load Model")
+        self.btn_model = QPushButton("Load Model")
         self.btn_model.clicked.connect(self._browse_model)
         ctrl_layout.addWidget(self.btn_model)
 
@@ -540,19 +540,19 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
-        self.btn_play = QPushButton("▶  Play")
+        self.btn_play = QPushButton("Play")
         self.btn_play.setObjectName("playBtn")
         self.btn_play.setFixedHeight(40)
         self.btn_play.clicked.connect(self._play)
         btn_layout.addWidget(self.btn_play)
 
-        self.btn_pause = QPushButton("⏸  Pause")
+        self.btn_pause = QPushButton("Pause")
         self.btn_pause.setFixedHeight(40)
         self.btn_pause.clicked.connect(self._pause)
         self.btn_pause.setEnabled(False)
         btn_layout.addWidget(self.btn_pause)
 
-        self.btn_stop = QPushButton("⏹  Stop")
+        self.btn_stop = QPushButton("Stop")
         self.btn_stop.setObjectName("stopBtn")
         self.btn_stop.setFixedHeight(40)
         self.btn_stop.clicked.connect(self._stop)
@@ -629,10 +629,10 @@ class MainWindow(QMainWindow):
         model_path = self.txt_model.text()
 
         if not video_path:
-            self.statusBar().showMessage("⚠ Please select a video file first.")
+            self.statusBar().showMessage("Please select a video file first.")
             return
         if not model_path:
-            self.statusBar().showMessage("⚠ Please select a model file first.")
+            self.statusBar().showMessage("Please select a model file first.")
             return
 
         # If thread is paused, just resume
@@ -640,7 +640,7 @@ class MainWindow(QMainWindow):
             self.video_thread.resume()
             self.btn_pause.setEnabled(True)
             self.btn_play.setEnabled(False)
-            self.statusBar().showMessage("▶ Resumed.")
+            self.statusBar().showMessage("Resumed.")
             return
 
         # Load model
@@ -654,13 +654,13 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
-        self.statusBar().showMessage("▶ Streaming with QCA analysis...")
+        self.statusBar().showMessage("Streaming with QCA analysis...")
 
     def _pause(self):
         self.video_thread.pause()
         self.btn_play.setEnabled(True)
         self.btn_pause.setEnabled(False)
-        self.statusBar().showMessage("⏸ Paused.")
+        self.statusBar().showMessage("Paused.")
 
     def _stop(self):
         self.video_thread.stop()
@@ -674,11 +674,11 @@ class MainWindow(QMainWindow):
         self.label_mask.setText("No video loaded")
         self.label_qca.clear()
         self.label_qca.setText("No video loaded")
-        self.lbl_fps.setText("FPS: —")
-        self.lbl_latency.setText("Latency: — ms")
-        self.lbl_stenosis.setText("No analysis yet — load a video and press Play")
+        self.lbl_fps.setText("FPS: --")
+        self.lbl_latency.setText("Latency: -- ms")
+        self.lbl_stenosis.setText("No analysis yet - load a video and press Play")
         self.lbl_stenosis.setStyleSheet("color: #FF6B6B; padding: 4px;")
-        self.statusBar().showMessage("⏹ Stopped.")
+        self.statusBar().showMessage("Stopped.")
 
     def _on_threshold_changed(self, value):
         t = value / 100.0

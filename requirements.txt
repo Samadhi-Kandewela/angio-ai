@@ -10,3 +10,10 @@ imageio
 pillow
 PyQt5
 albumentations
+matplotlib
+scipy
+scikit-image
+onnx
+thop
+graphviz
+adjustText

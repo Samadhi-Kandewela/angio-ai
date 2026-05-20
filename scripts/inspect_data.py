@@ -67,6 +67,7 @@ def visualize_dataset(base_path, dataset_type, split='train', num_samples=1):
         print(f"Saved visualization to {output_filename}")
 
 if __name__ == "__main__":
-    base_path = "e:/Research/dataset"
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_path = os.path.join(project_root, "dataset")
     visualize_dataset(base_path, "syntax")
     visualize_dataset(base_path, "stenosis")

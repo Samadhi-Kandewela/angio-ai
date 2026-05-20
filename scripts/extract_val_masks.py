@@ -3,8 +3,10 @@ import json
 import numpy as np
 import cv2
 
-json_path = r'E:\Research\dataset\stenosis\val\annotations\val.json'
-out_dir = r'E:\Research\dataset\stenosis\stenosis_val_mask'
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+json_path = os.path.join(PROJECT_ROOT, 'dataset', 'stenosis', 'val', 'annotations', 'val.json')
+out_dir = os.path.join(PROJECT_ROOT, 'dataset', 'stenosis', 'stenosis_val_mask')
 
 print(f"Loading annotations from {json_path}...")
 with open(json_path, 'r') as f:

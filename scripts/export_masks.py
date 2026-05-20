@@ -57,9 +57,9 @@ def export_masks(base_path, output_base, dataset_type='syntax', splits=['train',
     print(f"\nAll masks exported to {output_base}")
 
 if __name__ == "__main__":
-    # Adjust these paths if needed
-    BASE_PATH = "e:/Research/dataset"
-    OUTPUT_BASE = "e:/Research/exports"
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_PATH = os.path.join(project_root, "dataset")
+    OUTPUT_BASE = os.path.join(project_root, "exports")
     
     # We assume 'syntax' is the dataset type being used, based on other files
     export_masks(BASE_PATH, OUTPUT_BASE, dataset_type='syntax', splits=['train', 'test']) 

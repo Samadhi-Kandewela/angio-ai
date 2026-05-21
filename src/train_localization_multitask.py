@@ -153,6 +153,16 @@ def load_segmentation_warm_start(model, checkpoint_path, device):
         logging.info("Skipped %d incompatible tensors, usually the old final head.", len(skipped))
 
 
+def load_multitask_checkpoint(model, checkpoint_path, device):
+    if not checkpoint_path:
+        return
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Multitask checkpoint not found: {checkpoint_path}")
+    state = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state)
+    logging.info("Loaded multitask checkpoint: %s", checkpoint_path)
+
+
 def compute_loss(outputs, batch, weights, loss_state):
     vessel_target = batch["vessel_mask"]
     anatomy_target = batch["anatomy_mask"]
@@ -304,7 +314,10 @@ def train(args):
         n_anatomy_classes=NUM_ANATOMY_CLASSES,
         pretrained=args.pretrained,
     ).to(device)
-    load_segmentation_warm_start(model, args.init_segmentation_checkpoint, device)
+    if args.resume_checkpoint:
+        load_multitask_checkpoint(model, args.resume_checkpoint, device)
+    else:
+        load_segmentation_warm_start(model, args.init_segmentation_checkpoint, device)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1), eta_min=args.min_lr)
@@ -337,6 +350,27 @@ def train(args):
 
     logging.info("Train images: %d | Val images: %d", len(train_dataset), len(val_dataset))
     logging.info("Saving checkpoints to: %s", args.output_dir)
+
+    if args.eval_only:
+        metrics = evaluate(model, val_loader, device, weights, loss_state)
+        logging.info(
+            (
+                "eval_only val_loss=%.4f vessel_dice=%.4f "
+                "anatomy_acc=%.4f anatomy_group_acc=%.4f anatomy_artery_acc=%.4f "
+                "stenosis_dice=%.4f stenosis_soft_dice=%.4f "
+                "stenosis_precision=%.4f stenosis_recall=%.4f"
+            ),
+            metrics["loss"],
+            metrics["vessel_dice"],
+            metrics["anatomy_acc"],
+            metrics["anatomy_group_acc"],
+            metrics["anatomy_artery_acc"],
+            metrics["stenosis_dice"],
+            metrics["stenosis_soft_dice"],
+            metrics["stenosis_precision"],
+            metrics["stenosis_recall"],
+        )
+        return
 
     for epoch in range(1, args.epochs + 1):
         logging.info("Epoch %d/%d", epoch, args.epochs)
@@ -398,6 +432,8 @@ def get_args():
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA")
     parser.add_argument("--pretrained", action="store_true", help="Use ImageNet-pretrained MobileNetV3 encoder")
     parser.add_argument("--init-segmentation-checkpoint", type=str, default="")
+    parser.add_argument("--resume-checkpoint", type=str, default="", help="Resume/evaluate a multitask checkpoint")
+    parser.add_argument("--eval-only", action="store_true", help="Only evaluate the loaded checkpoint")
     parser.add_argument("--vessel-weight", type=float, default=0.7)
     parser.add_argument("--anatomy-weight", type=float, default=1.4)
     parser.add_argument("--stenosis-weight", type=float, default=1.6)

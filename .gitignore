@@ -141,3 +141,26 @@ create_architecture_diagram.py
 create_clahe_comparison.py
 generate_*.py
 plot_*.py
+
+# Allow ECG folder and its contents (override global ignores like *.png, *.md, *.pth)
+!/ECG/
+!/ECG/**
+
+# Explicitly ignore large or runtime folders inside ECG
+/ECG/venv/
+/ECG/dataset/
+/ECG/runs/
+/ECG/sample_results/
+/ECG/**/__pycache__/
+/ECG/ecg-image-kit/sample-data/
+/ECG/ecg-image-kit/codes/ecg-image-generator/SampleData/
+/ECG/**/*.pdf
+
+/ECG/2409.16612v1.pdf
+/ECG/2409.16612v1.md
+/ECG/CLAUDE.md
+/ECG/paper2_text.txt
+/ECG/pdf_text.txt
+/ECG/s41598-022-25284-1.md
+/ECG/s41598-022-25284-1.pdf
+

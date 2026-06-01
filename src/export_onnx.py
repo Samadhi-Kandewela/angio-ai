@@ -54,7 +54,8 @@ def export_model(model_path, output_path, model_name='mobileunetv3'):
                       input_names = ['input'],   # the model's input names
                       output_names = ['output'], # the model's output names
                       dynamic_axes={'input' : {0 : 'batch_size'},    # variable length axes
-                                    'output' : {0 : 'batch_size'}})
+                                    'output' : {0 : 'batch_size'}},
+                      dynamo=False)
 
     print("Export complete. Verifying...")
 

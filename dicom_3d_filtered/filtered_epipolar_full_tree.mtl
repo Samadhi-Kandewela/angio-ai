@@ -1,0 +1,6 @@
+newmtl reliable
+Kd 0.82 0.82 0.82
+newmtl usable
+Kd 0.55 0.72 1.0
+newmtl single_view_preserved
+Kd 1.0 0.65 0.18

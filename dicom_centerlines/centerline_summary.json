@@ -1,0 +1,32 @@
+[
+  {
+    "view": "IM0_frame_030",
+    "branches": 15,
+    "skeleton_pixels": 1602,
+    "endpoints": 12,
+    "junction_pixels": 24,
+    "top_branch_lengths": [
+      298,
+      197,
+      220,
+      159,
+      144,
+      130
+    ]
+  },
+  {
+    "view": "IM2_frame_022",
+    "branches": 9,
+    "skeleton_pixels": 800,
+    "endpoints": 8,
+    "junction_pixels": 15,
+    "top_branch_lengths": [
+      234,
+      142,
+      126,
+      109,
+      41,
+      32
+    ]
+  }
+]

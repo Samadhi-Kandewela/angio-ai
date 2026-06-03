@@ -1,0 +1,104 @@
+{
+  "input_obj": "dicom_pipeline_output_v2\\pipeline_hybrid_qca_tree_smoothed.obj",
+  "num_branches": 15,
+  "views": {
+    "view_a": {
+      "best_orientation": "mirror_v",
+      "orientation_scores": {
+        "normal": {
+          "samples": 728,
+          "inside_pct": 78.2967032967033,
+          "median_px": 17.99224853515625,
+          "mean_px": 34.67294138732709,
+          "p90_px": 90.52775650024418,
+          "max_px": 228.694580078125,
+          "objective": 19.077413370321086
+        },
+        "rotate_180": {
+          "samples": 728,
+          "inside_pct": 78.2967032967033,
+          "median_px": 27.795344352722168,
+          "mean_px": 41.38948092105096,
+          "p90_px": 103.56977539062503,
+          "max_px": 155.81396484375,
+          "objective": 28.880509187887004
+        },
+        "mirror_h": {
+          "samples": 728,
+          "inside_pct": 78.2967032967033,
+          "median_px": 31.56744384765625,
+          "mean_px": 39.32803169154284,
+          "p90_px": 89.91070175170898,
+          "max_px": 130.7255859375,
+          "objective": 32.65260868282108
+        },
+        "mirror_v": {
+          "samples": 728,
+          "inside_pct": 78.2967032967033,
+          "median_px": 12.787599563598633,
+          "mean_px": 22.006567928874702,
+          "p90_px": 48.689771270751976,
+          "max_px": 135.7131805419922,
+          "objective": 13.872764398763469
+        }
+      },
+      "median_branch_error_px": 14.196899652481079,
+      "p90_branch_error_px": 34.53938026428223,
+      "good_branches": 0,
+      "review_branches": 2,
+      "bad_branches": 13
+    },
+    "view_b": {
+      "best_orientation": "mirror_v",
+      "orientation_scores": {
+        "normal": {
+          "samples": 728,
+          "inside_pct": 62.5,
+          "median_px": 43.9534912109375,
+          "mean_px": 53.34316472771403,
+          "p90_px": 122.65302734375,
+          "max_px": 229.207763671875,
+          "objective": 45.8284912109375
+        },
+        "rotate_180": {
+          "samples": 728,
+          "inside_pct": 62.5,
+          "median_px": 46.78139114379883,
+          "mean_px": 82.48587247591752,
+          "p90_px": 189.4914794921875,
+          "max_px": 331.4310302734375,
+          "objective": 48.65639114379883
+        },
+        "mirror_h": {
+          "samples": 728,
+          "inside_pct": 62.5,
+          "median_px": 95.4976806640625,
+          "mean_px": 93.92809394689706,
+          "p90_px": 172.70512695312502,
+          "max_px": 217.5751953125,
+          "objective": 97.3726806640625
+        },
+        "mirror_v": {
+          "samples": 728,
+          "inside_pct": 62.5,
+          "median_px": 24.78759765625,
+          "mean_px": 42.15456855873485,
+          "p90_px": 109.09860839843758,
+          "max_px": 190.933349609375,
+          "objective": 26.66259765625
+        }
+      },
+      "median_branch_error_px": 24.480621337890625,
+      "p90_branch_error_px": 63.44093742370606,
+      "good_branches": 0,
+      "review_branches": 0,
+      "bad_branches": 15
+    }
+  },
+  "outputs": {
+    "csv": "dicom_pipeline_output_v2\\reprojection_validation_report.csv",
+    "markdown": "dicom_pipeline_output_v2\\reprojection_validation_report.md",
+    "view_a_overlay": "dicom_pipeline_output_v2\\view_a_reprojection_validation.png",
+    "view_b_overlay": "dicom_pipeline_output_v2\\view_b_reprojection_validation.png"
+  }
+}

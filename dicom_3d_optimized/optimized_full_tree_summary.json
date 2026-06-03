@@ -1,0 +1,88 @@
+{
+  "status": "full connected graph reprojection optimization prototype",
+  "warning": "This is a research prototype. It optimizes full IM0 topology against IM2 centerline reprojection, but still needs exact DICOM calibration, cardiac phase validation, and clinical validation.",
+  "num_unique_points": 1529,
+  "num_branches": 13,
+  "initial_im2_mean_distance_px": 24.522554906916923,
+  "initial_im2_median_distance_px": 18.922054125071522,
+  "optimized_im2_mean_distance_px": 11.411270665147892,
+  "optimized_im2_median_distance_px": 0.983835920134085,
+  "optimized_im2_95pct_distance_px": 62.296668985385566,
+  "optimizer_cost": 2601.9802773457086,
+  "optimizer_status": 4,
+  "optimizer_message": "Both `ftol` and `xtol` termination conditions are satisfied.",
+  "branch_rows": [
+    {
+      "branch_id": 0,
+      "points": 298,
+      "visual_radius_mm": 0.9
+    },
+    {
+      "branch_id": 1,
+      "points": 197,
+      "visual_radius_mm": 0.5741562499999999
+    },
+    {
+      "branch_id": 2,
+      "points": 220,
+      "visual_radius_mm": 0.662625
+    },
+    {
+      "branch_id": 3,
+      "points": 159,
+      "visual_radius_mm": 0.9
+    },
+    {
+      "branch_id": 4,
+      "points": 144,
+      "visual_radius_mm": 0.638875
+    },
+    {
+      "branch_id": 5,
+      "points": 130,
+      "visual_radius_mm": 0.9
+    },
+    {
+      "branch_id": 6,
+      "points": 88,
+      "visual_radius_mm": 0.9
+    },
+    {
+      "branch_id": 7,
+      "points": 61,
+      "visual_radius_mm": 0.3835625
+    },
+    {
+      "branch_id": 8,
+      "points": 65,
+      "visual_radius_mm": 0.9
+    },
+    {
+      "branch_id": 9,
+      "points": 58,
+      "visual_radius_mm": 0.5331875
+    },
+    {
+      "branch_id": 10,
+      "points": 36,
+      "visual_radius_mm": 0.36871875
+    },
+    {
+      "branch_id": 11,
+      "points": 34,
+      "visual_radius_mm": 0.8187812499999999
+    },
+    {
+      "branch_id": 12,
+      "points": 40,
+      "visual_radius_mm": 0.9
+    }
+  ],
+  "outputs": {
+    "obj": "E:\\Research - Copy\\dicom_3d_optimized\\optimized_full_tree.obj",
+    "preview_png": "E:\\Research - Copy\\dicom_3d_optimized\\optimized_full_tree_preview.png",
+    "reprojection_IM0": "E:\\Research - Copy\\dicom_3d_optimized\\optimized_reprojection_IM0.png",
+    "reprojection_IM2": "E:\\Research - Copy\\dicom_3d_optimized\\optimized_reprojection_IM2.png",
+    "points_csv": "E:\\Research - Copy\\dicom_3d_optimized\\optimized_full_tree_points.csv"
+  }
+}

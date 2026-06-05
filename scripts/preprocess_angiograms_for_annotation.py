@@ -8,11 +8,16 @@ import numpy as np
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
-def enhance_angiogram(image: np.ndarray) -> np.ndarray:
+def enhance_angiogram(image: np.ndarray, scale: float = 1.0) -> np.ndarray:
     if image.ndim == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image
+
+    if scale != 1.0:
+        height, width = gray.shape[:2]
+        new_size = (round(width * scale), round(height * scale))
+        gray = cv2.resize(gray, new_size, interpolation=cv2.INTER_CUBIC)
 
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     contrast = clahe.apply(gray)
@@ -31,7 +36,7 @@ def enhance_angiogram(image: np.ndarray) -> np.ndarray:
     return cv2.normalize(sharpened, None, 0, 255, cv2.NORM_MINMAX)
 
 
-def preprocess_folder(input_dir: Path, output_dir: Path) -> int:
+def preprocess_folder(input_dir: Path, output_dir: Path, scale: float) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     image_paths = sorted(
         path for path in input_dir.iterdir()
@@ -45,7 +50,7 @@ def preprocess_folder(input_dir: Path, output_dir: Path) -> int:
             print(f"Skipping unreadable image: {image_path}")
             continue
 
-        enhanced = enhance_angiogram(image)
+        enhanced = enhance_angiogram(image, scale=scale)
         output_path = output_dir / image_path.name
         cv2.imwrite(str(output_path), enhanced)
         count += 1
@@ -69,12 +74,20 @@ def main() -> None:
         default=Path("new_preprocessed_images"),
         help="Folder where enhanced images will be saved.",
     )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Upscale factor before enhancement. Use 2 for 1024x1024 from 512x512.",
+    )
     args = parser.parse_args()
 
     if not args.input_dir.exists():
         raise FileNotFoundError(f"Input folder not found: {args.input_dir}")
+    if args.scale <= 0:
+        raise ValueError("--scale must be greater than 0")
 
-    count = preprocess_folder(args.input_dir, args.output_dir)
+    count = preprocess_folder(args.input_dir, args.output_dir, scale=args.scale)
     print(f"Saved {count} enhanced images to: {args.output_dir}")
 
 

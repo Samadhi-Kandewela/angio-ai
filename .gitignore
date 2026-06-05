@@ -6,7 +6,23 @@ __pycache__/
 # C extensions
 *.so
 
+#3d middle folders/
+dicom_auto_selection/
+dicom_auto_selection_fast/
+dicom_auto_selection_final/
+dicom_auto_selection_top3/
+dicom_confidence_layered/
+dicom_confidence_layered_validation/
+dicom_epipolar_optimized/
+dicom_epipolar_optimized_validation/
+dicom_full_3d_run/
+dicom_smoothed_confidence/
+dicom_smoothed_confidence_im1_frame14/
+dicom_smoothed_confidence_im1_frame22/
+dicom_smoothed_confidence_im1_refined
+
 # Distribution / packaging
+angio only/
 3d_papers/
 dicom_sample/
 .Python

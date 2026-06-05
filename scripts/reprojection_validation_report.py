@@ -348,10 +348,13 @@ def write_markdown(path: Path, summary: Dict[str, object], csv_name: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", type=Path, default=ROOT / "dicom_pipeline_output_v2")
+    parser.add_argument("--output-dir", type=Path, help="Where to write validation outputs. Defaults to input dir.")
     parser.add_argument("--obj", type=Path, help="OBJ to validate. Defaults to smoothed OBJ, then raw pipeline OBJ.")
     args = parser.parse_args()
 
     input_dir = args.input_dir
+    output_dir = args.output_dir or input_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
     obj_path = args.obj
     if obj_path is None:
         smoothed = input_dir / "pipeline_hybrid_qca_tree_smoothed.obj"
@@ -390,12 +393,12 @@ def main():
             view=data["view"],
             original=data["original"],
             mask=data["mask"],
-            output_dir=input_dir,
+            output_dir=output_dir,
         )
         all_rows.extend(rows)
         view_summaries[view_key] = view_summary
 
-    csv_path = input_dir / "reprojection_validation_report.csv"
+    csv_path = output_dir / "reprojection_validation_report.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
         writer.writeheader()
@@ -407,14 +410,14 @@ def main():
         "views": view_summaries,
         "outputs": {
             "csv": str(csv_path),
-            "markdown": str(input_dir / "reprojection_validation_report.md"),
-            "view_a_overlay": str(input_dir / "view_a_reprojection_validation.png"),
-            "view_b_overlay": str(input_dir / "view_b_reprojection_validation.png"),
+            "markdown": str(output_dir / "reprojection_validation_report.md"),
+            "view_a_overlay": str(output_dir / "view_a_reprojection_validation.png"),
+            "view_b_overlay": str(output_dir / "view_b_reprojection_validation.png"),
         },
     }
-    with open(input_dir / "reprojection_validation_summary.json", "w", encoding="utf-8") as f:
+    with open(output_dir / "reprojection_validation_summary.json", "w", encoding="utf-8") as f:
         json.dump(full_summary, f, indent=2)
-    write_markdown(input_dir / "reprojection_validation_report.md", full_summary, csv_path.name)
+    write_markdown(output_dir / "reprojection_validation_report.md", full_summary, csv_path.name)
     print(json.dumps(full_summary, indent=2))
 
 

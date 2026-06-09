@@ -123,7 +123,7 @@ def evaluate(model, dataloader, device):
 def get_args():
     parser = argparse.ArgumentParser(description="Evaluate multitask localization model")
     parser.add_argument("--checkpoint", required=True, help="Path to .pth checkpoint")
-    parser.add_argument("--data-dir", default="dataset/arcade", help="Dataset root directory")
+    parser.add_argument("--data-dir", default="dataset", help="Dataset root directory")
     parser.add_argument("--split", default="val", choices=["val", "test"], help="Split to evaluate on")
     parser.add_argument("--image-size", type=int, default=512, help="Input image size")
     parser.add_argument("--batch-size", type=int, default=6)

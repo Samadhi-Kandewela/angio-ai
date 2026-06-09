@@ -291,7 +291,7 @@ def train(args):
                        pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_dataset, shuffle=False, drop_last=False, **loader_args)
 
-    model = MultiTaskMobileUNetv3(n_anatomy_classes=NUM_ANATOMY_CLASSES, pretrained=False).to(device)
+    model = MultiTaskMobileUNetv3(n_anatomy_classes=NUM_ANATOMY_CLASSES, pretrained=args.pretrained).to(device)
     if args.resume_checkpoint:
         state = torch.load(args.resume_checkpoint, map_location=device)
         model.load_state_dict(state)
@@ -376,6 +376,7 @@ def get_args():
     parser.add_argument("--data-dir", default="dataset")
     parser.add_argument("--output-dir", default="checkpoints/multitask_v3")
     parser.add_argument("--resume-checkpoint", default="", help="Continue from this .pth checkpoint")
+    parser.add_argument("--pretrained", action="store_true", help="Use ImageNet-pretrained MobileNetV3 encoder")
     parser.add_argument("--eval-only", action="store_true", help="Evaluate checkpoint without training")
     parser.add_argument("--val-split", default="val", choices=["val", "test"])
     parser.add_argument("--epochs", type=int, default=120)

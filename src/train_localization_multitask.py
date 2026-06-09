@@ -255,7 +255,7 @@ def evaluate(model, dataloader, device, weights, loss_state):
     anatomy_group_acc = 0.0
     anatomy_artery_acc = 0.0
 
-    for raw_batch in tqdm(dataloader, desc="Val", unit="batch", leave=True):
+    for raw_batch in tqdm(dataloader, desc="Val", unit="batch", leave=False):
         batch = move_batch_to_device(raw_batch, device)
         outputs = model(batch["image"])
         loss, _ = compute_loss(outputs, batch, weights, loss_state)
@@ -353,19 +353,23 @@ def train(args):
 
     if args.eval_only:
         metrics = evaluate(model, val_loader, device, weights, loss_state)
-        print("\n" + "=" * 50)
-        print("LOCALIZATION MODEL EVALUATION RESULTS")
-        print("=" * 50)
-        print(f"  Vessel Dice:            {metrics['vessel_dice']:.4f}")
-        print(f"  Anatomy Acc (segment):  {metrics['anatomy_acc']:.4f}")
-        print(f"  Anatomy Acc (group):    {metrics['anatomy_group_acc']:.4f}")
-        print(f"  Anatomy Acc (artery):   {metrics['anatomy_artery_acc']:.4f}")
-        print(f"  Stenosis Dice:          {metrics['stenosis_dice']:.4f}")
-        print(f"  Stenosis Soft Dice:     {metrics['stenosis_soft_dice']:.4f}")
-        print(f"  Stenosis Precision:     {metrics['stenosis_precision']:.4f}")
-        print(f"  Stenosis Recall:        {metrics['stenosis_recall']:.4f}")
-        print(f"  Val Loss:               {metrics['loss']:.4f}")
-        print("=" * 50)
+        logging.info(
+            (
+                "eval_only val_loss=%.4f vessel_dice=%.4f "
+                "anatomy_acc=%.4f anatomy_group_acc=%.4f anatomy_artery_acc=%.4f "
+                "stenosis_dice=%.4f stenosis_soft_dice=%.4f "
+                "stenosis_precision=%.4f stenosis_recall=%.4f"
+            ),
+            metrics["loss"],
+            metrics["vessel_dice"],
+            metrics["anatomy_acc"],
+            metrics["anatomy_group_acc"],
+            metrics["anatomy_artery_acc"],
+            metrics["stenosis_dice"],
+            metrics["stenosis_soft_dice"],
+            metrics["stenosis_precision"],
+            metrics["stenosis_recall"],
+        )
         return
 
     for epoch in range(1, args.epochs + 1):

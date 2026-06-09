@@ -72,21 +72,25 @@ class CoronaryMultiTaskDataset(Dataset):
         transforms = [A.Resize(height=height, width=width)]
         if augment:
             transforms += [
-                A.ShiftScaleRotate(
-                    shift_limit=0.04,
-                    scale_limit=0.08,
-                    rotate_limit=8,
-                    border_mode=cv2.BORDER_CONSTANT,
-                    value=0,
-                    mask_value=0,
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.2),
+                A.Affine(
+                    translate_percent={"x": (-0.04, 0.04), "y": (-0.04, 0.04)},
+                    scale=(0.92, 1.08),
+                    rotate=(-8, 8),
+                    mode=cv2.BORDER_CONSTANT,
+                    cval=0,
+                    cval_mask=0,
                     p=0.45,
                 ),
+                A.ElasticTransform(alpha=30, sigma=5, p=0.30),
+                A.GridDistortion(num_steps=4, distort_limit=0.15, p=0.20),
                 A.RandomBrightnessContrast(
                     brightness_limit=0.18,
                     contrast_limit=0.18,
                     p=0.45,
                 ),
-                A.GaussNoise(var_limit=(5.0, 25.0), p=0.20),
+                A.GaussNoise(std_range=(0.02, 0.10), p=0.20),
             ]
         return A.Compose(transforms)
 

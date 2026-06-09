@@ -373,7 +373,7 @@ def train(args):
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train improved multitask localization model (v3)")
-    parser.add_argument("--data-dir", default="dataset/arcade")
+    parser.add_argument("--data-dir", default="dataset")
     parser.add_argument("--output-dir", default="checkpoints/multitask_v3")
     parser.add_argument("--resume-checkpoint", default="", help="Continue from this .pth checkpoint")
     parser.add_argument("--eval-only", action="store_true", help="Evaluate checkpoint without training")

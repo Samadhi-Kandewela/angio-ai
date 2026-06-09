@@ -15,15 +15,16 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 
-def dice_loss(logits, target, smooth=1.0):
+def dice_loss_from_logits(logits, target, smooth=1.0):
     probs = torch.sigmoid(logits).contiguous()
+    target = target.contiguous()
     dims = (2, 3)
     intersection = (probs * target).sum(dim=dims)
     union = probs.sum(dim=dims) + target.sum(dim=dims)
     return (1.0 - (2.0 * intersection + smooth) / (union + smooth)).mean()
 
 
-def focal_tversky_loss(logits, target, alpha=0.25, beta=0.75, gamma=0.75, smooth=1.0):
+def focal_tversky_loss_from_logits(logits, target, alpha=0.25, beta=0.75, gamma=0.75, smooth=1.0):
     probs = torch.sigmoid(logits)
     dims = (2, 3)
     tp = (probs * target).sum(dim=dims)
@@ -33,17 +34,25 @@ def focal_tversky_loss(logits, target, alpha=0.25, beta=0.75, gamma=0.75, smooth
     return torch.pow(1.0 - tversky, gamma).mean()
 
 
+def vessel_only_cross_entropy(logits, target):
+    valid = target > 0
+    if valid.sum() == 0:
+        return logits.sum() * 0.0
+    return F.cross_entropy(logits, target, reduction="none")[valid].mean()
+
+
 def compute_loss(outputs, batch):
     vessel_bce = F.binary_cross_entropy_with_logits(outputs["vessel"], batch["vessel_mask"])
-    vessel_dice_l = dice_loss(outputs["vessel"], batch["vessel_mask"])
-    valid = batch["anatomy_mask"] > 0
-    anatomy_ce = (
-        F.cross_entropy(outputs["anatomy"], batch["anatomy_mask"], reduction="none")[valid].mean()
-        if valid.sum() > 0 else outputs["anatomy"].sum() * 0.0
-    )
+    vessel_dice = dice_loss_from_logits(outputs["vessel"], batch["vessel_mask"])
+    anatomy_ce = vessel_only_cross_entropy(outputs["anatomy"], batch["anatomy_mask"])
     stenosis_bce = F.binary_cross_entropy_with_logits(outputs["stenosis"], batch["stenosis_mask"])
-    stenosis_tversky = focal_tversky_loss(outputs["stenosis"], batch["stenosis_mask"])
-    return (vessel_bce + vessel_dice_l + anatomy_ce + stenosis_bce + stenosis_tversky).item()
+    stenosis_tversky = focal_tversky_loss_from_logits(outputs["stenosis"], batch["stenosis_mask"])
+    total = (
+        0.7 * (vessel_bce + vessel_dice)
+        + 1.4 * anatomy_ce
+        + 1.6 * (stenosis_bce + stenosis_tversky)
+    )
+    return total.item()
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if SRC_DIR not in sys.path:

@@ -14,6 +14,37 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+
+def dice_loss(logits, target, smooth=1.0):
+    probs = torch.sigmoid(logits).contiguous()
+    dims = (2, 3)
+    intersection = (probs * target).sum(dim=dims)
+    union = probs.sum(dim=dims) + target.sum(dim=dims)
+    return (1.0 - (2.0 * intersection + smooth) / (union + smooth)).mean()
+
+
+def focal_tversky_loss(logits, target, alpha=0.25, beta=0.75, gamma=0.75, smooth=1.0):
+    probs = torch.sigmoid(logits)
+    dims = (2, 3)
+    tp = (probs * target).sum(dim=dims)
+    fp = (probs * (1.0 - target)).sum(dim=dims)
+    fn = ((1.0 - probs) * target).sum(dim=dims)
+    tversky = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
+    return torch.pow(1.0 - tversky, gamma).mean()
+
+
+def compute_loss(outputs, batch):
+    vessel_bce = F.binary_cross_entropy_with_logits(outputs["vessel"], batch["vessel_mask"])
+    vessel_dice_l = dice_loss(outputs["vessel"], batch["vessel_mask"])
+    valid = batch["anatomy_mask"] > 0
+    anatomy_ce = (
+        F.cross_entropy(outputs["anatomy"], batch["anatomy_mask"], reduction="none")[valid].mean()
+        if valid.sum() > 0 else outputs["anatomy"].sum() * 0.0
+    )
+    stenosis_bce = F.binary_cross_entropy_with_logits(outputs["stenosis"], batch["stenosis_mask"])
+    stenosis_tversky = focal_tversky_loss(outputs["stenosis"], batch["stenosis_mask"])
+    return (vessel_bce + vessel_dice_l + anatomy_ce + stenosis_bce + stenosis_tversky).item()
+
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
@@ -77,6 +108,7 @@ def stenosis_precision_recall(logits, target, threshold=0.3):
 def evaluate(model, dataloader, device):
     model.eval()
 
+    total_loss = 0.0
     vessel_dice_total = 0.0
     stenosis_dice_total = 0.0
     stenosis_soft_dice_total = 0.0
@@ -92,10 +124,16 @@ def evaluate(model, dataloader, device):
         anatomy_mask = batch["anatomy_mask"].to(device, dtype=torch.long)
         stenosis_mask = batch["stenosis_mask"].to(device, dtype=torch.float32)
 
+        dev_batch = {
+            "vessel_mask": vessel_mask,
+            "anatomy_mask": anatomy_mask,
+            "stenosis_mask": stenosis_mask,
+        }
         outputs = model(image)
 
         precision, recall = stenosis_precision_recall(outputs["stenosis"], stenosis_mask)
 
+        total_loss += compute_loss(outputs, dev_batch)
         vessel_dice_total += dice_score(outputs["vessel"], vessel_mask)
         stenosis_dice_total += dice_score(outputs["stenosis"], stenosis_mask)
         stenosis_soft_dice_total += soft_dice_score(outputs["stenosis"], stenosis_mask)
@@ -107,6 +145,7 @@ def evaluate(model, dataloader, device):
 
     n = max(len(dataloader), 1)
     return {
+        "loss": total_loss / n,
         "vessel_dice": vessel_dice_total / n,
         "anatomy_acc": anatomy_acc_total / n,
         "anatomy_group_acc": anatomy_group_acc_total / n,
@@ -158,6 +197,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("LOCALIZATION MODEL EVALUATION RESULTS")
     print("=" * 50)
+    print(f"  Val Loss:               {metrics['loss']:.4f}")
     print(f"  Vessel Dice:            {metrics['vessel_dice']:.4f}")
     print(f"  Anatomy Acc (segment):  {metrics['anatomy_acc']:.4f}  <- 25 SYNTAX segments")
     print(f"  Anatomy Acc (group):    {metrics['anatomy_group_acc']:.4f}  <- e.g. LAD proximal, RCA mid")

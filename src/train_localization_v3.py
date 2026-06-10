@@ -295,7 +295,17 @@ def train(args):
     if args.resume_checkpoint:
         state = torch.load(args.resume_checkpoint, map_location=device)
         model.load_state_dict(state)
-        logging.info("Loaded checkpoint: %s", args.resume_checkpoint)
+        logging.info("Loaded multitask checkpoint: %s", args.resume_checkpoint)
+    elif args.init_segmentation_checkpoint:
+        state = torch.load(args.init_segmentation_checkpoint, map_location=device)
+        model_state = model.state_dict()
+        compatible = {k: v for k, v in state.items() if k in model_state and model_state[k].shape == v.shape}
+        skipped = [k for k in state if k not in compatible]
+        model_state.update(compatible)
+        model.load_state_dict(model_state)
+        logging.info("Warm-start: loaded %d tensors from %s", len(compatible), args.init_segmentation_checkpoint)
+        if skipped:
+            logging.info("Skipped %d incompatible layers (final heads).", len(skipped))
 
     weights = {"vessel": args.vessel_weight, "anatomy": args.anatomy_weight, "stenosis": args.stenosis_weight}
     loss_state = {
@@ -377,6 +387,7 @@ def get_args():
     parser.add_argument("--output-dir", default="checkpoints/multitask_v3")
     parser.add_argument("--resume-checkpoint", default="", help="Continue from this .pth checkpoint")
     parser.add_argument("--pretrained", action="store_true", help="Use ImageNet-pretrained MobileNetV3 encoder")
+    parser.add_argument("--init-segmentation-checkpoint", default="", help="Warm-start encoder+decoder from a segmentation model")
     parser.add_argument("--eval-only", action="store_true", help="Evaluate checkpoint without training")
     parser.add_argument("--val-split", default="val", choices=["val", "test"])
     parser.add_argument("--epochs", type=int, default=120)

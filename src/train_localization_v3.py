@@ -13,14 +13,14 @@ Changes vs original:
 Usage (fine-tune from existing checkpoint):
     python src/train_localization_v3.py ^
         --device cuda --amp ^
-        --data-dir dataset/arcade ^
+        --data-dir dataset ^
         --resume-checkpoint checkpoints/multitask_localization_v2/multitask_best.pth ^
         --output-dir checkpoints/multitask_v3
 
 Evaluate:
     python src/eval_localization.py ^
         --checkpoint checkpoints/multitask_v3/multitask_best.pth ^
-        --data-dir dataset/arcade --device cuda
+        --data-dir dataset --device cuda
 """
 
 import argparse
@@ -363,13 +363,20 @@ def train(args):
         metrics = evaluate(model, val_loader, device, weights, loss_state)
         scheduler.step()
 
-        score = (
-            0.35 * metrics["anatomy_acc"]
-            + 0.25 * metrics["anatomy_group_acc"]
-            + 0.25 * metrics["vessel_dice"]
-            + 0.10 * metrics["stenosis_recall"]
-            + 0.05 * metrics["stenosis_soft_dice"]
-        )
+        if weights["stenosis"] > 0:
+            score = (
+                0.35 * metrics["anatomy_acc"]
+                + 0.25 * metrics["anatomy_group_acc"]
+                + 0.25 * metrics["vessel_dice"]
+                + 0.10 * metrics["stenosis_recall"]
+                + 0.05 * metrics["stenosis_soft_dice"]
+            )
+        else:
+            score = (
+                0.50 * metrics["anatomy_acc"]
+                + 0.30 * metrics["anatomy_group_acc"]
+                + 0.20 * metrics["vessel_dice"]
+            )
 
         logging.info("train_loss=%.4f val_loss=%.4f score=%.4f", train_loss, metrics["loss"], score)
         print_metrics(metrics)

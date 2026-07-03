@@ -84,6 +84,8 @@ def distance_to_mask_stats(points_xy: np.ndarray, distance_map: np.ndarray) -> D
     if not np.any(inside):
         return {"inside_pct": 0.0, "median_px": float("inf"), "p90_px": float("inf")}
     pix = np.rint(points_xy[inside]).astype(int)
+    pix[:, 0] = np.clip(pix[:, 0], 0, w - 1)
+    pix[:, 1] = np.clip(pix[:, 1], 0, h - 1)
     d = distance_map[pix[:, 1], pix[:, 0]].astype(np.float64)
     return {
         "inside_pct": float(np.count_nonzero(inside) / max(len(points_xy), 1) * 100.0),

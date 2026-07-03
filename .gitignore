@@ -20,6 +20,19 @@ dicom_smoothed_confidence/
 dicom_smoothed_confidence_im1_frame14/
 dicom_smoothed_confidence_im1_frame22/
 dicom_smoothed_confidence_im1_refined
+dicom_files/
+dicom_dataset_processed/
+dicom_doctor_review/
+dicom_multiview_review/
+dicom_batch_3d_review/
+dicom_batch_branch_graphs/
+dicom_batch_branch_graphs_expanded/
+dicom_3d_candidate_ranking/
+dicom_3d_candidate_ranking_expanded/
+dicom_ranked_reconstructions/
+dicom_full_tree_hybrid/
+dicom_2d_reference_trees/
+dicom_case_3d_reconstructions/
 
 # Distribution / packaging
 angio only/

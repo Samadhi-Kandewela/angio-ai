@@ -1,0 +1,8 @@
+{
+  "status": "hybrid full tree with QCA-derived variable radius",
+  "meaning": "The tree preserves full IM0 topology, uses stereo-informed/clamped depth, and uses IM0 distance-transform/QCA radius so stenosis-like narrowing appears in the mesh.",
+  "object_pixel_mm_used": 0.16650425199279298,
+  "obj": "E:\\Research - Copy\\dicom_3d_filtered\\hybrid_qca_radius_tree.obj",
+  "preview_png": "E:\\Research - Copy\\dicom_3d_filtered\\hybrid_qca_radius_preview.png",
+  "radius_report": "E:\\Research - Copy\\dicom_3d_filtered\\hybrid_qca_radius_report.csv"
+}

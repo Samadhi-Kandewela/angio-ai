@@ -1,0 +1,52 @@
+file: dicom_sample\DICOM\PA0\ST0\SE1\IM0
+frames: 35
+rows: 512
+columns: 512
+primary: -0.1
+secondary: -21.90
+cine_rate: 15
+frame_time: 66.6667
+sdd: 1027
+spd: 720
+pixel_spacing: [0.2375, 0.2375]
+contact_sheet: dicom_preview\IM0_contact_sheet.png
+
+file: dicom_sample\DICOM\PA0\ST0\SE1\IM1
+frames: 40
+rows: 512
+columns: 512
+primary: -0.4
+secondary: 45
+cine_rate: 15
+frame_time: 66.6667
+sdd: 1182
+spd: 720
+pixel_spacing: [0.2375, 0.2375]
+contact_sheet: dicom_preview\IM1_contact_sheet.png
+
+file: dicom_sample\DICOM\PA0\ST0\SE1\IM2
+frames: 38
+rows: 512
+columns: 512
+primary: 40.70
+secondary: -40.70
+cine_rate: 15
+frame_time: 66.6667
+sdd: 1188
+spd: 720
+pixel_spacing: [0.2375, 0.2375]
+contact_sheet: dicom_preview\IM2_contact_sheet.png
+
+file: dicom_sample\DICOM\PA0\ST0\SE1\IM3
+frames: 40
+rows: 512
+columns: 512
+primary: 30.80
+secondary: -1.70
+cine_rate: 15
+frame_time: 66.6667
+sdd: 1034
+spd: 720
+pixel_spacing: [0.2375, 0.2375]
+contact_sheet: dicom_preview\IM3_contact_sheet.png
+

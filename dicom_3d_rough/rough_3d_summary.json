@@ -1,0 +1,15 @@
+{
+  "num_points": 320,
+  "num_matches": 4,
+  "mean_ray_residual_mm": 9.935561421613924,
+  "median_ray_residual_mm": 7.1901010655117235,
+  "max_ray_residual_mm": 28.61167523175572,
+  "important_warning": "This is a rough first-pass reconstruction using approximate C-arm geometry and provisional branch correspondences. It is for inspection and pipeline validation, not clinical measurement.",
+  "outputs": {
+    "points_csv": "E:\\Research - Copy\\dicom_3d_rough\\rough_3d_points.csv",
+    "points_ply": "E:\\Research - Copy\\dicom_3d_rough\\rough_3d_skeleton_points.ply",
+    "plot_png": "E:\\Research - Copy\\dicom_3d_rough\\rough_3d_skeleton_plot.png",
+    "reprojection_view_a": "E:\\Research - Copy\\dicom_3d_rough\\rough_3d_reprojection_view_a.png",
+    "reprojection_view_b": "E:\\Research - Copy\\dicom_3d_rough\\rough_3d_reprojection_view_b.png"
+  }
+}

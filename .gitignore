@@ -6,7 +6,38 @@ __pycache__/
 # C extensions
 *.so
 
+#3d middle folders/
+dicom_auto_selection/
+dicom_auto_selection_fast/
+dicom_auto_selection_final/
+dicom_auto_selection_top3/
+dicom_confidence_layered/
+dicom_confidence_layered_validation/
+dicom_epipolar_optimized/
+dicom_epipolar_optimized_validation/
+dicom_full_3d_run/
+dicom_smoothed_confidence/
+dicom_smoothed_confidence_im1_frame14/
+dicom_smoothed_confidence_im1_frame22/
+dicom_smoothed_confidence_im1_refined
+dicom_files/
+dicom_dataset_processed/
+dicom_doctor_review/
+dicom_multiview_review/
+dicom_batch_3d_review/
+dicom_batch_branch_graphs/
+dicom_batch_branch_graphs_expanded/
+dicom_3d_candidate_ranking/
+dicom_3d_candidate_ranking_expanded/
+dicom_ranked_reconstructions/
+dicom_full_tree_hybrid/
+dicom_2d_reference_trees/
+dicom_case_3d_reconstructions/
+
 # Distribution / packaging
+angio only/
+3d_papers/
+dicom_sample/
 .Python
 build/
 develop-eggs/
@@ -174,4 +205,3 @@ plot_*.py
 /ECG/first_successful_implementation/
 /ECG/MI images/
 /ECG/papers/
-

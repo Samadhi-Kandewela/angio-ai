@@ -1,0 +1,63 @@
+{
+  "description": "First rough branch matches for IM0 frame 30 and IM2 frame 22. These are provisional anatomical matches used to generate the first 3D skeleton.",
+  "view_a": {
+    "name": "IM0_frame_030",
+    "primary_angle_deg": -0.1,
+    "secondary_angle_deg": -21.9,
+    "source_detector_distance_mm": 1027.0,
+    "source_patient_distance_mm": 720.0,
+    "imager_pixel_spacing_mm": [0.2375, 0.2375],
+    "image_size_px": [512, 512]
+  },
+  "view_b": {
+    "name": "IM2_frame_022",
+    "primary_angle_deg": 40.7,
+    "secondary_angle_deg": -40.7,
+    "source_detector_distance_mm": 1188.0,
+    "source_patient_distance_mm": 720.0,
+    "imager_pixel_spacing_mm": [0.2375, 0.2375],
+    "image_size_px": [512, 512]
+  },
+  "matches": [
+    {
+      "match_id": "proximal_main_trunk",
+      "view_a_branch_id": 3,
+      "view_b_branch_id": 2,
+      "reverse_view_a": true,
+      "reverse_view_b": false,
+      "samples": 80,
+      "confidence": "medium",
+      "note": "Large proximal segment connecting the upper-left junction to the central bifurcation."
+    },
+    {
+      "match_id": "inferior_long_branch",
+      "view_a_branch_id": 2,
+      "view_b_branch_id": 0,
+      "reverse_view_a": true,
+      "reverse_view_b": true,
+      "samples": 100,
+      "confidence": "medium",
+      "note": "Long inferior/downward vessel branch visible in both views."
+    },
+    {
+      "match_id": "right_distal_branch",
+      "view_a_branch_id": 4,
+      "view_b_branch_id": 1,
+      "reverse_view_a": true,
+      "reverse_view_b": false,
+      "samples": 70,
+      "confidence": "low_medium",
+      "note": "Right/distal branch, useful but affected by projection differences and distal overlap."
+    },
+    {
+      "match_id": "upper_branch",
+      "view_a_branch_id": 0,
+      "view_b_branch_id": 3,
+      "reverse_view_a": true,
+      "reverse_view_b": false,
+      "samples": 70,
+      "confidence": "low",
+      "note": "Upper branch included for first shape context; likely needs refinement after 3D inspection."
+    }
+  ]
+}

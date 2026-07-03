@@ -1,0 +1,64 @@
+{
+  "description": "Refined branch matches after first residual review. Bad inferior full-branch match removed/replaced with a better proximal-inferior sub-branch.",
+  "output_prefix": "refined_3d",
+  "view_a": {
+    "name": "IM0_frame_030",
+    "primary_angle_deg": -0.1,
+    "secondary_angle_deg": -21.9,
+    "source_detector_distance_mm": 1027.0,
+    "source_patient_distance_mm": 720.0,
+    "imager_pixel_spacing_mm": [0.2375, 0.2375],
+    "image_size_px": [512, 512]
+  },
+  "view_b": {
+    "name": "IM2_frame_022",
+    "primary_angle_deg": 40.7,
+    "secondary_angle_deg": -40.7,
+    "source_detector_distance_mm": 1188.0,
+    "source_patient_distance_mm": 720.0,
+    "imager_pixel_spacing_mm": [0.2375, 0.2375],
+    "image_size_px": [512, 512]
+  },
+  "matches": [
+    {
+      "match_id": "proximal_main_trunk",
+      "view_a_branch_id": 3,
+      "view_b_branch_id": 2,
+      "reverse_view_a": true,
+      "reverse_view_b": false,
+      "samples": 80,
+      "confidence": "high",
+      "note": "Kept from rough pass; very low triangulation residual."
+    },
+    {
+      "match_id": "inferior_branch_refined",
+      "view_a_branch_id": 5,
+      "view_b_branch_id": 0,
+      "reverse_view_a": false,
+      "reverse_view_b": true,
+      "samples": 80,
+      "confidence": "medium",
+      "note": "Replaces the poor full inferior match A2-B0. This captures the geometrically consistent visible segment."
+    },
+    {
+      "match_id": "right_distal_branch",
+      "view_a_branch_id": 4,
+      "view_b_branch_id": 1,
+      "reverse_view_a": true,
+      "reverse_view_b": true,
+      "samples": 70,
+      "confidence": "medium",
+      "note": "Orientation adjusted after residual scan."
+    },
+    {
+      "match_id": "upper_branch_context",
+      "view_a_branch_id": 0,
+      "view_b_branch_id": 3,
+      "reverse_view_a": true,
+      "reverse_view_b": true,
+      "samples": 70,
+      "confidence": "low_medium",
+      "note": "Kept as shape context; still needs anatomical review."
+    }
+  ]
+}

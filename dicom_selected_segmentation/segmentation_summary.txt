@@ -1,0 +1,84 @@
+label: IM0
+dicom_file: E:\Research - Copy\dicom_sample\DICOM\PA0\ST0\SE1\IM0
+frame: 25
+primary_angle: -0.1
+secondary_angle: -21.90
+mask_pixels: 15925
+mask_percent: 6.075
+mean_probability: 0.0619
+max_probability: 0.9993
+overlay: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_025_overlay.png
+mask: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_025_mask.png
+qca: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_025_qca.png
+qca_info: lesions=1, top_DS=31.5%, MLD=9.1px, RVD=13.3px
+
+label: IM0
+dicom_file: E:\Research - Copy\dicom_sample\DICOM\PA0\ST0\SE1\IM0
+frame: 30
+primary_angle: -0.1
+secondary_angle: -21.90
+mask_pixels: 24075
+mask_percent: 9.184
+mean_probability: 0.0937
+max_probability: 0.9988
+overlay: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_030_overlay.png
+mask: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_030_mask.png
+qca: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_030_qca.png
+qca_info: lesions=2, top_DS=55.1%, MLD=5.0px, RVD=11.2px
+
+label: IM0
+dicom_file: E:\Research - Copy\dicom_sample\DICOM\PA0\ST0\SE1\IM0
+frame: 35
+primary_angle: -0.1
+secondary_angle: -21.90
+mask_pixels: 18356
+mask_percent: 7.002
+mean_probability: 0.0723
+max_probability: 0.9994
+overlay: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_035_overlay.png
+mask: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_035_mask.png
+qca: E:\Research - Copy\dicom_selected_segmentation\IM0_frame_035_qca.png
+qca_info: lesions=1, top_DS=22.1%, MLD=6.5px, RVD=8.3px
+
+label: IM2
+dicom_file: E:\Research - Copy\dicom_sample\DICOM\PA0\ST0\SE1\IM2
+frame: 22
+primary_angle: 40.70
+secondary_angle: -40.70
+mask_pixels: 15310
+mask_percent: 5.84
+mean_probability: 0.0598
+max_probability: 0.9985
+overlay: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_022_overlay.png
+mask: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_022_mask.png
+qca: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_022_qca.png
+qca_info: lesions=1, top_DS=63.3%, MLD=3.7px, RVD=10.0px
+
+label: IM2
+dicom_file: E:\Research - Copy\dicom_sample\DICOM\PA0\ST0\SE1\IM2
+frame: 27
+primary_angle: 40.70
+secondary_angle: -40.70
+mask_pixels: 13370
+mask_percent: 5.1
+mean_probability: 0.0529
+max_probability: 0.999
+overlay: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_027_overlay.png
+mask: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_027_mask.png
+qca: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_027_qca.png
+qca_info: lesions=2, top_DS=73.8%, MLD=4.4px, RVD=16.6px
+
+label: IM2
+dicom_file: E:\Research - Copy\dicom_sample\DICOM\PA0\ST0\SE1\IM2
+frame: 32
+primary_angle: 40.70
+secondary_angle: -40.70
+mask_pixels: 14780
+mask_percent: 5.638
+mean_probability: 0.0572
+max_probability: 0.9994
+overlay: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_032_overlay.png
+mask: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_032_mask.png
+qca: E:\Research - Copy\dicom_selected_segmentation\IM2_frame_032_qca.png
+qca_info: lesions=0, branches=5
+

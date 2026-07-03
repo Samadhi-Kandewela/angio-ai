@@ -43,11 +43,34 @@ if SRC_DIR not in sys.path:
 from qca import (
     QCAConfig, to_binary_mask, morph_cleanup, qca_from_mask, draw_overlay
 )
+from localization import anatomy_logits_to_map_and_confidence, localize_lesions
 
-# Default model path (relative to project root)
-DEFAULT_MODEL_PATH = os.path.join(
-    PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"
-)
+DEFAULT_SEGMENTATION_MODEL_PATHS = [
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
+]
+DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.pth"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_best.pth"),
+]
+
+
+def first_existing_path(paths):
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
+DEFAULT_MODEL_PATH = first_existing_path(DEFAULT_SEGMENTATION_MODEL_PATHS)
+
+
+def create_ort_session(model_path):
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    return ort.InferenceSession(model_path, sess_options=options)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,14 +92,27 @@ class VideoThread(QThread):
         self._paused = False
         self.video_path = None
         self.model_path = None
+        self.localization_model_path = None
         self.threshold = 0.5
         self.overlay_alpha = 0.4
         self.overlay_color = [255, 0, 0]  # Red (RGB)
 
-        # Model handles
+        # Segmentation model handles
         self._ort_session = None
+        self._ort_input_name = None
         self._torch_model = None
         self._is_onnx = False
+
+        # Localization model handles
+        self._loc_ort_session = None
+        self._loc_ort_input_name = None
+        self._loc_output_names = None
+        self._loc_torch_model = None
+        self._loc_is_onnx = False
+        self._loc_class_map = None
+        self._loc_confidence_map = None
+        self._loc_frame_interval = 15
+        self._frame_index = 0
 
         # QCA config
         self._qca_cfg = QCAConfig(severe_threshold=70.0)
@@ -85,13 +121,15 @@ class VideoThread(QThread):
         """Load model (ONNX or PyTorch) before starting the thread."""
         self.model_path = model_path
         self._is_onnx = model_path.lower().endswith('.onnx')
+        self._ort_input_name = None
 
         if self._is_onnx:
             if not HAS_ONNX:
                 self.error.emit("onnxruntime not installed. Run: pip install onnxruntime")
                 return False
             try:
-                self._ort_session = ort.InferenceSession(model_path)
+                self._ort_session = create_ort_session(model_path)
+                self._ort_input_name = self._ort_session.get_inputs()[0].name
                 return True
             except Exception as e:
                 self.error.emit(f"ONNX load error: {e}")
@@ -129,6 +167,90 @@ class VideoThread(QThread):
                 self.error.emit(f"PyTorch load error: {e}")
                 return False
 
+    def load_localization_model(self, model_path):
+        """Load optional multitask localization model (ONNX or PyTorch)."""
+        self.localization_model_path = model_path
+        self._loc_ort_session = None
+        self._loc_ort_input_name = None
+        self._loc_output_names = None
+        self._loc_torch_model = None
+        self._loc_class_map = None
+        self._loc_confidence_map = None
+        self._frame_index = 0
+
+        if not model_path:
+            return True
+        if not os.path.exists(model_path):
+            self.error.emit(f"Localization model not found: {model_path}")
+            return False
+
+        self._loc_is_onnx = model_path.lower().endswith('.onnx')
+        if self._loc_is_onnx:
+            if not HAS_ONNX:
+                self.error.emit("onnxruntime not installed. Run: pip install onnxruntime")
+                return False
+            try:
+                self._loc_ort_session = create_ort_session(model_path)
+                self._loc_ort_input_name = self._loc_ort_session.get_inputs()[0].name
+                self._loc_output_names = [o.name.lower() for o in self._loc_ort_session.get_outputs()]
+                return True
+            except Exception as e:
+                self.error.emit(f"Localization ONNX load error: {e}")
+                return False
+
+        try:
+            import torch
+            from model_multitask import MultiTaskMobileUNetv3
+
+            device = torch.device('cpu')
+            model = MultiTaskMobileUNetv3(pretrained=False)
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            model.eval()
+            self._loc_torch_model = model
+            return True
+        except ImportError:
+            self.error.emit("PyTorch not installed. Use .onnx localization models instead.")
+            return False
+        except Exception as e:
+            self.error.emit(f"Localization PyTorch load error: {e}")
+            return False
+
+    def _run_localization(self, img_rgb_enhanced):
+        """Refresh cached anatomical class and confidence maps."""
+        try:
+            if self._loc_ort_session is not None:
+                loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
+                outputs = self._loc_ort_session.run(None, {self._loc_ort_input_name: loc_input})
+                if self._loc_output_names and "anatomy" in self._loc_output_names:
+                    anatomy = outputs[self._loc_output_names.index("anatomy")]
+                else:
+                    anatomy = outputs[1] if len(outputs) > 1 else outputs[0]
+            elif self._loc_torch_model is not None:
+                import torch as _torch
+                loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
+                with _torch.no_grad():
+                    tensor_in = _torch.from_numpy(loc_input).float()
+                    outputs = self._loc_torch_model(tensor_in)
+                    anatomy = outputs["anatomy"].cpu().numpy()
+            else:
+                return
+
+            self._loc_class_map, self._loc_confidence_map = anatomy_logits_to_map_and_confidence(anatomy)
+        except Exception as e:
+            self.error.emit(f"Localization inference error: {e}")
+            self._loc_class_map = None
+            self._loc_confidence_map = None
+
+    @staticmethod
+    def _preprocess_localization_numpy(img_rgb_enhanced):
+        """Localization model was trained with ImageNet normalization."""
+        img_float = img_rgb_enhanced.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img_float = (img_float - mean) / std
+        img_chw = np.transpose(img_float, (2, 0, 1))
+        return np.expand_dims(img_chw, axis=0).astype(np.float32)
+
     def _run_qca(self, original_gray, mask_binary_uint8):
         """
         Run QCA analysis on a single frame.
@@ -147,17 +269,30 @@ class VideoThread(QThread):
             if not branches:
                 return None, ""
 
+            if self._loc_class_map is not None and self._loc_confidence_map is not None and lesions:
+                lesions = localize_lesions(lesions, self._loc_class_map, self._loc_confidence_map, radius=9)
+
             # draw_overlay expects BGR input
             qca_vis = draw_overlay(original_gray, bw, branches, lesions)
+            self._draw_localization_overlay(qca_vis, lesions)
 
             # Build stenosis info string
             if lesions:
                 top = lesions[0]
+                loc_text = "Location=unavailable"
+                if "localization" in top:
+                    loc = top["localization"]
+                    loc_text = (
+                        f"Location={loc['group']} ({loc['label']})  "
+                        f"Artery={loc['artery']}  "
+                        f"LocConf={loc['confidence']:.2f}"
+                    )
                 info = (
                     f"Top Lesion: DS={top['DS_percent']:.1f}%  "
                     f"Severity={top['severity']}  "
                     f"MLD={top['MLD_px']:.1f}px  "
                     f"RVD={top['RVD_px']:.1f}px  "
+                    f"{loc_text}  "
                     f"| Total Lesions: {len(lesions)} across {len(branches)} branches"
                 )
             else:
@@ -167,6 +302,45 @@ class VideoThread(QThread):
 
         except Exception:
             return None, ""
+
+    @staticmethod
+    def _draw_localization_overlay(qca_vis, lesions):
+        """Draw anatomical localization near the top QCA lesion on the QCA overlay."""
+        if qca_vis is None or not lesions:
+            return
+
+        top = lesions[0]
+        loc = top.get("localization")
+        if not loc:
+            return
+
+        y, x = top["min_pt"]
+        conf = float(loc.get("confidence", 0.0))
+        label = f"{loc.get('artery', 'unknown')} {loc.get('group', 'unknown')} {conf:.2f}"
+        color = (0, 255, 0) if conf >= 0.70 else (0, 220, 255) if conf >= 0.45 else (0, 120, 255)
+
+        h, w = qca_vis.shape[:2]
+        x = int(np.clip(x, 0, w - 1))
+        y = int(np.clip(y, 0, h - 1))
+
+        cv2.circle(qca_vis, (x, y), 7, color, 2)
+        cv2.line(qca_vis, (x, y), (min(w - 1, x + 22), max(0, y - 18)), color, 1)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.42
+        thickness = 1
+        (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
+        text_x = int(np.clip(x + 26, 0, max(0, w - text_w - 6)))
+        text_y = int(np.clip(y - 18, text_h + 6, h - baseline - 4))
+
+        cv2.rectangle(
+            qca_vis,
+            (text_x - 3, text_y - text_h - 4),
+            (text_x + text_w + 3, text_y + baseline + 3),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.putText(qca_vis, label, (text_x, text_y), font, scale, color, thickness, cv2.LINE_AA)
 
     def run(self):
         """Main loop: read frames, infer, run QCA, and emit UI frames."""
@@ -213,8 +387,7 @@ class VideoThread(QThread):
             t_start = time.perf_counter()
 
             if self._is_onnx and self._ort_session:
-                input_name = self._ort_session.get_inputs()[0].name
-                pred = self._ort_session.run(None, {input_name: img_batch})[0]
+                pred = self._ort_session.run(None, {self._ort_input_name: img_batch})[0]
                 pred = 1.0 / (1.0 + np.exp(-pred))  # sigmoid
                 mask = pred.squeeze()
             elif self._torch_model is not None:
@@ -230,9 +403,17 @@ class VideoThread(QThread):
             else:
                 mask = np.zeros((512, 512), dtype=np.float32)
 
+            if (
+                self._loc_ort_session is not None or self._loc_torch_model is not None
+            ) and (
+                self._loc_class_map is None or self._frame_index % self._loc_frame_interval == 0
+            ):
+                self._run_localization(img_rgb_enhanced)
+
             t_end = time.perf_counter()
             latency_ms = (t_end - t_start) * 1000.0
             fps = 1000.0 / max(latency_ms, 0.001)
+            self._frame_index += 1
 
             # ── Panel 2: Mask Overlay ─────────────────────────────────
             mask_binary = (mask > self.threshold).astype(np.uint8)
@@ -509,6 +690,19 @@ class MainWindow(QMainWindow):
             self.txt_model.setText(DEFAULT_MODEL_PATH)
         ctrl_layout.addWidget(self.txt_model)
 
+        self.btn_loc_model = QPushButton("Load Localization")
+        self.btn_loc_model.clicked.connect(self._browse_localization_model)
+        ctrl_layout.addWidget(self.btn_loc_model)
+
+        self.txt_loc_model = QLineEdit()
+        self.txt_loc_model.setPlaceholderText("Select multitask .onnx or .pth model...")
+        self.txt_loc_model.setReadOnly(False)
+        self.txt_loc_model.setMinimumWidth(160)
+        default_loc = first_existing_path(DEFAULT_LOCALIZATION_MODEL_PATHS)
+        if default_loc:
+            self.txt_loc_model.setText(default_loc)
+        ctrl_layout.addWidget(self.txt_loc_model)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.VLine)
@@ -623,10 +817,20 @@ class MainWindow(QMainWindow):
             self.txt_model.setText(path)
             self.statusBar().showMessage(f"Model loaded: {os.path.basename(path)}")
 
+    def _browse_localization_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Localization Model", "",
+            "Model Files (*.onnx *.pth);;All Files (*)"
+        )
+        if path:
+            self.txt_loc_model.setText(path)
+            self.statusBar().showMessage(f"Localization model loaded: {os.path.basename(path)}")
+
     # ── Controls ─────────────────────────────────────────────────────
     def _play(self):
         video_path = self.txt_video.text()
         model_path = self.txt_model.text()
+        loc_model_path = self.txt_loc_model.text().strip()
 
         if not video_path:
             self.statusBar().showMessage("Please select a video file first.")
@@ -647,6 +851,9 @@ class MainWindow(QMainWindow):
         ok = self.video_thread.load_model(model_path)
         if not ok:
             return
+        ok = self.video_thread.load_localization_model(loc_model_path)
+        if not ok:
+            return
 
         self.video_thread.video_path = video_path
         self.video_thread.start()
@@ -654,7 +861,10 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
-        self.statusBar().showMessage("Streaming with QCA analysis...")
+        if loc_model_path:
+            self.statusBar().showMessage("Streaming with QCA and anatomical localization...")
+        else:
+            self.statusBar().showMessage("Streaming with QCA analysis...")
 
     def _pause(self):
         self.video_thread.pause()

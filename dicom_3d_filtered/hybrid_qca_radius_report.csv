@@ -1,0 +1,16 @@
+branch_id,status,points,min_radius_mm,ref_radius_mm_p80,estimated_diameter_stenosis_pct,min_point_y,min_point_x,marker_added
+0,single_view_preserved,298,0.242,1.43,83.1,190,290,False
+1,single_view_preserved,197,0.516,0.707,27.0,383,48,False
+2,single_view_preserved,220,0.496,0.906,45.2,451,176,False
+3,reliable,159,1.139,1.482,23.2,259,295,False
+4,reliable,144,0.399,1.026,61.1,348,440,True
+5,usable,130,1.324,1.473,10.1,236,193,False
+6,reliable,88,1.479,1.922,23.0,75,123,False
+7,reliable,61,0.355,0.618,42.5,315,400,True
+8,reliable,65,1.501,1.834,18.2,153,183,False
+9,single_view_preserved,58,0.412,0.714,42.3,389,207,False
+10,single_view_preserved,36,0.305,0.49,37.9,413,237,False
+11,reliable,34,0.935,1.364,31.4,295,326,True
+12,reliable,40,2.046,2.3,11.0,58,77,False
+13,reliable,27,0.3,0.535,44.0,243,300,True
+14,single_view_preserved,23,0.315,0.726,56.7,425,295,False

@@ -74,7 +74,7 @@ def remove_red_grid(img_bgr: np.ndarray, threshold: float = 0.94) -> np.ndarray:
         candidate_signal = gray_mod_norm <= threshold
 
         # Step 2: exclude red-dominant grid pixels (R >> G and R >> B)
-        is_red = (r - g > 0.10) & (r - b > 0.10) & (r > 0.25)
+        is_red = (r - g > 0.15) & (r - b > 0.15) & (r > 0.3)
         return (candidate_signal & ~is_red).astype(np.uint8) * 255
 
     else:

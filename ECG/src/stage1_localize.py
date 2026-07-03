@@ -37,21 +37,18 @@ def detect_baseline(binary: np.ndarray, original_bgr: np.ndarray = None) -> int:
     """
     h, w = binary.shape
 
-    # ── Grayscale path ──────────────────────────────────────────────────────
+    # ── Argmin path (darkest pixel) ─────────────────────────────────────────
     if original_bgr is not None:
-        r = original_bgr[:, :, 2].astype(np.float32) / 255.0
-        g = original_bgr[:, :, 1].astype(np.float32) / 255.0
-        if float(np.mean(np.abs(r - g))) < 0.03:
-            gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
-            trace_y = np.argmin(gray, axis=0).astype(np.int32)
-            # Mode = the y the trace visits most often = isoelectric baseline
-            counts = np.bincount(trace_y, minlength=h)
-            # Restrict to middle 60% of image to avoid border artefacts
-            top_limit = int(h * 0.20)
-            bot_limit = int(h * 0.80)
-            counts[:top_limit] = 0
-            counts[bot_limit:] = 0
-            return int(np.argmax(counts))
+        gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
+        trace_y = np.argmin(gray, axis=0).astype(np.int32)
+        # Mode = the y the trace visits most often = isoelectric baseline
+        counts = np.bincount(trace_y, minlength=h)
+        # Restrict to middle 60% of image to avoid border artefacts
+        top_limit = int(h * 0.20)
+        bot_limit = int(h * 0.80)
+        counts[:top_limit] = 0
+        counts[bot_limit:] = 0
+        return int(np.argmax(counts))
 
     # ── Color / Hough path (Wu et al.) ──────────────────────────────────────
     row_sums = binary.sum(axis=1).astype(np.float32)

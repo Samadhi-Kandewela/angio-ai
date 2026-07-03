@@ -220,9 +220,10 @@ def digitize(
         voltage_mv : calibrated voltage array (mV)
         signal_y   : raw pixel y-coordinates before calibration
     """
-    # For grayscale ECGs, binary thresholding cannot cleanly separate the
-    # trace from the grid; use argmin-based extraction instead.
-    if cropped_original_bgr is not None and _is_grayscale(cropped_original_bgr):
+    # The argmin-based extraction is universally superior for this single-lead 
+    # strip pipeline: the black ECG ink is always the darkest structure in any 
+    # ECG image regardless of grid colour.
+    if cropped_original_bgr is not None:
         return _digitize_grayscale(
             cropped_original_bgr, baseline_y_local, dpi, visualize, output_prefix
         )

@@ -155,6 +155,9 @@ plot_*.py
 /ECG/ecg-image-kit/sample-data/
 /ECG/ecg-image-kit/codes/ecg-image-generator/SampleData/
 /ECG/**/*.pdf
+/ECG/**/*.npy
+/ECG/**/*.csv
+/ECG/**/*_results/
 
 /ECG/2409.16612v1.pdf
 /ECG/2409.16612v1.md
@@ -163,4 +166,12 @@ plot_*.py
 /ECG/pdf_text.txt
 /ECG/s41598-022-25284-1.md
 /ECG/s41598-022-25284-1.pdf
+
+# Ignore additional unnecessary ECG files/folders
+/ECG/checkpoints/history.json
+/ECG/checkpoints/training_history.png
+/ECG/ecg-12-lead-model/pipeline_outputs/
+/ECG/first_successful_implementation/
+/ECG/MI images/
+/ECG/papers/
 

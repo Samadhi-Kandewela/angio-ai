@@ -29,29 +29,11 @@ def dice_loss_from_logits(logits, target, smooth=1.0):
     return (1.0 - ((2.0 * intersection + smooth) / (union + smooth))).mean()
 
 
-def focal_tversky_loss_from_logits(logits, target, alpha=0.25, beta=0.75, gamma=0.75, smooth=1.0):
-    probs = torch.sigmoid(logits)
-    dims = (2, 3)
-    true_pos = (probs * target).sum(dim=dims)
-    false_pos = (probs * (1.0 - target)).sum(dim=dims)
-    false_neg = ((1.0 - probs) * target).sum(dim=dims)
-    tversky = (true_pos + smooth) / (true_pos + alpha * false_pos + beta * false_neg + smooth)
-    return torch.pow(1.0 - tversky, gamma).mean()
-
-
 def dice_score_from_logits(logits, target, threshold=0.5, smooth=1.0):
     pred = (torch.sigmoid(logits) > threshold).float()
     dims = (1, 2, 3)
     intersection = (pred * target).sum(dim=dims)
     union = pred.sum(dim=dims) + target.sum(dim=dims)
-    return ((2.0 * intersection + smooth) / (union + smooth)).mean().item()
-
-
-def soft_dice_score_from_logits(logits, target, smooth=1.0):
-    probs = torch.sigmoid(logits)
-    dims = (1, 2, 3)
-    intersection = (probs * target).sum(dim=dims)
-    union = probs.sum(dim=dims) + target.sum(dim=dims)
     return ((2.0 * intersection + smooth) / (union + smooth)).mean().item()
 
 
@@ -74,17 +56,6 @@ def mapped_anatomy_accuracy(logits, target, mapping, device):
     return (pred_mapped[valid] == target_mapped[valid]).float().mean().item()
 
 
-def stenosis_detection_stats(logits, target, threshold=0.3):
-    pred = torch.sigmoid(logits) > threshold
-    truth = target > 0.5
-    true_pos = (pred & truth).sum().float()
-    false_pos = (pred & ~truth).sum().float()
-    false_neg = (~pred & truth).sum().float()
-    precision = true_pos / torch.clamp(true_pos + false_pos, min=1.0)
-    recall = true_pos / torch.clamp(true_pos + false_neg, min=1.0)
-    return precision.item(), recall.item()
-
-
 def make_anatomy_class_weights(dataset, num_classes, device, max_weight=8.0):
     counts = dataset.estimate_anatomy_pixel_counts(num_classes=num_classes)
     vessel_counts = counts.copy()
@@ -103,22 +74,6 @@ def make_anatomy_class_weights(dataset, num_classes, device, max_weight=8.0):
         ", ".join(f"{idx}:{weights[idx]:.2f}" for idx in range(num_classes)),
     )
     return weights.to(device)
-
-
-def make_stenosis_pos_weight(dataset, device, max_pos_weight=50.0):
-    positives, negatives = dataset.estimate_stenosis_pixel_counts()
-    if positives <= 0:
-        logging.warning("No stenosis pixels found in training set. Using pos_weight=1.")
-        value = 1.0
-    else:
-        value = min(negatives / positives, max_pos_weight)
-    logging.info(
-        "Stenosis pixels: positive=%.0f negative=%.0f pos_weight=%.2f",
-        positives,
-        negatives,
-        value,
-    )
-    return torch.tensor([value], dtype=torch.float32, device=device)
 
 
 def vessel_only_cross_entropy(logits, target, class_weights=None):
@@ -159,14 +114,14 @@ def load_multitask_checkpoint(model, checkpoint_path, device):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Multitask checkpoint not found: {checkpoint_path}")
     state = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(state)
+    # strict=False: older checkpoints may still contain a now-removed stenosis_head
+    model.load_state_dict(state, strict=False)
     logging.info("Loaded multitask checkpoint: %s", checkpoint_path)
 
 
 def compute_loss(outputs, batch, weights, loss_state):
     vessel_target = batch["vessel_mask"]
     anatomy_target = batch["anatomy_mask"]
-    stenosis_target = batch["stenosis_mask"]
 
     vessel_bce = F.binary_cross_entropy_with_logits(outputs["vessel"], vessel_target)
     vessel_dice = dice_loss_from_logits(outputs["vessel"], vessel_target)
@@ -175,29 +130,15 @@ def compute_loss(outputs, batch, weights, loss_state):
         anatomy_target,
         class_weights=loss_state.get("anatomy_class_weights"),
     )
-    stenosis_bce = F.binary_cross_entropy_with_logits(
-        outputs["stenosis"],
-        stenosis_target,
-        pos_weight=loss_state.get("stenosis_pos_weight"),
-    )
-    stenosis_tversky = focal_tversky_loss_from_logits(
-        outputs["stenosis"],
-        stenosis_target,
-        alpha=loss_state["tversky_alpha"],
-        beta=loss_state["tversky_beta"],
-        gamma=loss_state["tversky_gamma"],
-    )
 
     total = (
         weights["vessel"] * (vessel_bce + vessel_dice)
         + weights["anatomy"] * anatomy_ce
-        + weights["stenosis"] * (stenosis_bce + stenosis_tversky)
     )
 
     return total, {
         "vessel": (vessel_bce + vessel_dice).item(),
         "anatomy": anatomy_ce.item(),
-        "stenosis": (stenosis_bce + stenosis_tversky).item(),
     }
 
 
@@ -206,7 +147,6 @@ def move_batch_to_device(batch, device):
         "image": batch["image"].to(device=device, dtype=torch.float32),
         "vessel_mask": batch["vessel_mask"].to(device=device, dtype=torch.float32),
         "anatomy_mask": batch["anatomy_mask"].to(device=device, dtype=torch.long),
-        "stenosis_mask": batch["stenosis_mask"].to(device=device, dtype=torch.float32),
     }
 
 
@@ -236,7 +176,6 @@ def train_one_epoch(model, dataloader, optimizer, device, weights, loss_state, s
         pbar.set_postfix(
             loss=f"{loss.item():.4f}",
             anatomy=f"{parts['anatomy']:.3f}",
-            stenosis=f"{parts['stenosis']:.3f}",
         )
 
     return running / max(len(dataloader), 1)
@@ -247,10 +186,6 @@ def evaluate(model, dataloader, device, weights, loss_state):
     model.eval()
     total_loss = 0.0
     vessel_dice = 0.0
-    stenosis_dice = 0.0
-    stenosis_soft_dice = 0.0
-    stenosis_precision = 0.0
-    stenosis_recall = 0.0
     anatomy_acc = 0.0
     anatomy_group_acc = 0.0
     anatomy_artery_acc = 0.0
@@ -259,14 +194,9 @@ def evaluate(model, dataloader, device, weights, loss_state):
         batch = move_batch_to_device(raw_batch, device)
         outputs = model(batch["image"])
         loss, _ = compute_loss(outputs, batch, weights, loss_state)
-        precision, recall = stenosis_detection_stats(outputs["stenosis"], batch["stenosis_mask"])
 
         total_loss += loss.item()
         vessel_dice += dice_score_from_logits(outputs["vessel"], batch["vessel_mask"])
-        stenosis_dice += dice_score_from_logits(outputs["stenosis"], batch["stenosis_mask"])
-        stenosis_soft_dice += soft_dice_score_from_logits(outputs["stenosis"], batch["stenosis_mask"])
-        stenosis_precision += precision
-        stenosis_recall += recall
         anatomy_acc += anatomy_accuracy(outputs["anatomy"], batch["anatomy_mask"], vessel_only=True)
         anatomy_group_acc += mapped_anatomy_accuracy(outputs["anatomy"], batch["anatomy_mask"], SEGMENT_TO_GROUP_ID, device)
         anatomy_artery_acc += mapped_anatomy_accuracy(outputs["anatomy"], batch["anatomy_mask"], SEGMENT_TO_ARTERY_ID, device)
@@ -275,10 +205,6 @@ def evaluate(model, dataloader, device, weights, loss_state):
     return {
         "loss": total_loss / n,
         "vessel_dice": vessel_dice / n,
-        "stenosis_dice": stenosis_dice / n,
-        "stenosis_soft_dice": stenosis_soft_dice / n,
-        "stenosis_precision": stenosis_precision / n,
-        "stenosis_recall": stenosis_recall / n,
         "anatomy_acc": anatomy_acc / n,
         "anatomy_group_acc": anatomy_group_acc / n,
         "anatomy_artery_acc": anatomy_artery_acc / n,
@@ -326,7 +252,6 @@ def train(args):
     weights = {
         "vessel": args.vessel_weight,
         "anatomy": args.anatomy_weight,
-        "stenosis": args.stenosis_weight,
     }
     loss_state = {
         "anatomy_class_weights": make_anatomy_class_weights(
@@ -335,14 +260,6 @@ def train(args):
             device,
             max_weight=args.max_anatomy_class_weight,
         ) if args.class_balanced_anatomy else None,
-        "stenosis_pos_weight": make_stenosis_pos_weight(
-            train_dataset,
-            device,
-            max_pos_weight=args.max_stenosis_pos_weight,
-        ) if args.weighted_stenosis_bce else None,
-        "tversky_alpha": args.tversky_alpha,
-        "tversky_beta": args.tversky_beta,
-        "tversky_gamma": args.tversky_gamma,
     }
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -356,19 +273,13 @@ def train(args):
         logging.info(
             (
                 "eval_only val_loss=%.4f vessel_dice=%.4f "
-                "anatomy_acc=%.4f anatomy_group_acc=%.4f anatomy_artery_acc=%.4f "
-                "stenosis_dice=%.4f stenosis_soft_dice=%.4f "
-                "stenosis_precision=%.4f stenosis_recall=%.4f"
+                "anatomy_acc=%.4f anatomy_group_acc=%.4f anatomy_artery_acc=%.4f"
             ),
             metrics["loss"],
             metrics["vessel_dice"],
             metrics["anatomy_acc"],
             metrics["anatomy_group_acc"],
             metrics["anatomy_artery_acc"],
-            metrics["stenosis_dice"],
-            metrics["stenosis_soft_dice"],
-            metrics["stenosis_precision"],
-            metrics["stenosis_recall"],
         )
         return
 
@@ -379,19 +290,15 @@ def train(args):
         scheduler.step()
 
         score = (
-            0.25 * metrics["vessel_dice"]
-            + 0.25 * metrics["anatomy_acc"]
-            + 0.25 * metrics["anatomy_group_acc"]
-            + 0.15 * metrics["stenosis_recall"]
-            + 0.10 * metrics["stenosis_soft_dice"]
+            0.50 * metrics["anatomy_acc"]
+            + 0.30 * metrics["anatomy_group_acc"]
+            + 0.20 * metrics["vessel_dice"]
         )
 
         logging.info(
             (
                 "train_loss=%.4f val_loss=%.4f vessel_dice=%.4f "
-                "anatomy_acc=%.4f anatomy_group_acc=%.4f anatomy_artery_acc=%.4f "
-                "stenosis_dice=%.4f stenosis_soft_dice=%.4f "
-                "stenosis_precision=%.4f stenosis_recall=%.4f score=%.4f"
+                "anatomy_acc=%.4f anatomy_group_acc=%.4f anatomy_artery_acc=%.4f score=%.4f"
             ),
             train_loss,
             metrics["loss"],
@@ -399,10 +306,6 @@ def train(args):
             metrics["anatomy_acc"],
             metrics["anatomy_group_acc"],
             metrics["anatomy_artery_acc"],
-            metrics["stenosis_dice"],
-            metrics["stenosis_soft_dice"],
-            metrics["stenosis_precision"],
-            metrics["stenosis_recall"],
             score,
         )
 
@@ -417,7 +320,7 @@ def train(args):
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Train real-time coronary segmentation + localization model")
+    parser = argparse.ArgumentParser(description="Train real-time coronary segmentation + localization model (vessel + anatomy only)")
     parser.add_argument("--data-dir", type=str, default="dataset")
     parser.add_argument("--output-dir", type=str, default="checkpoints/multitask_localization")
     parser.add_argument("--epochs", type=int, default=80)
@@ -436,16 +339,9 @@ def get_args():
     parser.add_argument("--eval-only", action="store_true", help="Only evaluate the loaded checkpoint")
     parser.add_argument("--vessel-weight", type=float, default=0.7)
     parser.add_argument("--anatomy-weight", type=float, default=1.4)
-    parser.add_argument("--stenosis-weight", type=float, default=1.6)
     parser.add_argument("--class-balanced-anatomy", action="store_true", default=True)
     parser.add_argument("--no-class-balanced-anatomy", action="store_false", dest="class_balanced_anatomy")
     parser.add_argument("--max-anatomy-class-weight", type=float, default=8.0)
-    parser.add_argument("--weighted-stenosis-bce", action="store_true", default=True)
-    parser.add_argument("--no-weighted-stenosis-bce", action="store_false", dest="weighted_stenosis_bce")
-    parser.add_argument("--max-stenosis-pos-weight", type=float, default=50.0)
-    parser.add_argument("--tversky-alpha", type=float, default=0.25)
-    parser.add_argument("--tversky-beta", type=float, default=0.75)
-    parser.add_argument("--tversky-gamma", type=float, default=0.75)
     return parser.parse_args()
 
 

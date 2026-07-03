@@ -75,7 +75,7 @@ if __name__ == "__main__":
         n_anatomy_classes=NUM_ANATOMY_CLASSES, pretrained=False
     ).to(device)
     multitask.load_state_dict(
-        torch.load(args.multitask_checkpoint, map_location=device)
+        torch.load(args.multitask_checkpoint, map_location=device), strict=False
     )
     multitask.eval()
 

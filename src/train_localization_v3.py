@@ -210,7 +210,8 @@ def train(args):
     model = MultiTaskMobileUNetv3(n_anatomy_classes=NUM_ANATOMY_CLASSES, pretrained=args.pretrained).to(device)
     if args.resume_checkpoint:
         state = torch.load(args.resume_checkpoint, map_location=device)
-        model.load_state_dict(state)
+        # strict=False: older checkpoints may still contain a now-removed stenosis_head
+        model.load_state_dict(state, strict=False)
         logging.info("Loaded multitask checkpoint: %s", args.resume_checkpoint)
     elif args.init_segmentation_checkpoint:
         state = torch.load(args.init_segmentation_checkpoint, map_location=device)

@@ -24,16 +24,6 @@ def dice_loss_from_logits(logits, target, smooth=1.0):
     return (1.0 - (2.0 * intersection + smooth) / (union + smooth)).mean()
 
 
-def focal_tversky_loss_from_logits(logits, target, alpha=0.25, beta=0.75, gamma=0.75, smooth=1.0):
-    probs = torch.sigmoid(logits)
-    dims = (2, 3)
-    tp = (probs * target).sum(dim=dims)
-    fp = (probs * (1.0 - target)).sum(dim=dims)
-    fn = ((1.0 - probs) * target).sum(dim=dims)
-    tversky = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
-    return torch.pow(1.0 - tversky, gamma).mean()
-
-
 def vessel_only_cross_entropy(logits, target):
     valid = target > 0
     if valid.sum() == 0:
@@ -45,12 +35,9 @@ def compute_loss(outputs, batch):
     vessel_bce = F.binary_cross_entropy_with_logits(outputs["vessel"], batch["vessel_mask"])
     vessel_dice = dice_loss_from_logits(outputs["vessel"], batch["vessel_mask"])
     anatomy_ce = vessel_only_cross_entropy(outputs["anatomy"], batch["anatomy_mask"])
-    stenosis_bce = F.binary_cross_entropy_with_logits(outputs["stenosis"], batch["stenosis_mask"])
-    stenosis_tversky = focal_tversky_loss_from_logits(outputs["stenosis"], batch["stenosis_mask"])
     total = (
         0.7 * (vessel_bce + vessel_dice)
         + 1.4 * anatomy_ce
-        + 1.6 * (stenosis_bce + stenosis_tversky)
     )
     return total.item()
 
@@ -73,14 +60,6 @@ def dice_score(logits, target, threshold=0.5, smooth=1.0):
     return ((2.0 * intersection + smooth) / (union + smooth)).mean().item()
 
 
-def soft_dice_score(logits, target, smooth=1.0):
-    probs = torch.sigmoid(logits)
-    dims = (1, 2, 3)
-    intersection = (probs * target).sum(dim=dims)
-    union = probs.sum(dim=dims) + target.sum(dim=dims)
-    return ((2.0 * intersection + smooth) / (union + smooth)).mean().item()
-
-
 def anatomy_accuracy(logits, target, vessel_only=True):
     pred = torch.argmax(logits, dim=1)
     valid = target > 0 if vessel_only else torch.ones_like(target, dtype=torch.bool)
@@ -100,17 +79,6 @@ def mapped_accuracy(logits, target, mapping, device):
     return (pred_mapped[valid] == target_mapped[valid]).float().mean().item()
 
 
-def stenosis_precision_recall(logits, target, threshold=0.3):
-    pred = torch.sigmoid(logits) > threshold
-    truth = target > 0.5
-    tp = (pred & truth).sum().float()
-    fp = (pred & ~truth).sum().float()
-    fn = (~pred & truth).sum().float()
-    precision = tp / torch.clamp(tp + fp, min=1.0)
-    recall = tp / torch.clamp(tp + fn, min=1.0)
-    return precision.item(), recall.item()
-
-
 # ─── Evaluation loop ──────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -119,10 +87,6 @@ def evaluate(model, dataloader, device):
 
     total_loss = 0.0
     vessel_dice_total = 0.0
-    stenosis_dice_total = 0.0
-    stenosis_soft_dice_total = 0.0
-    stenosis_precision_total = 0.0
-    stenosis_recall_total = 0.0
     anatomy_acc_total = 0.0
     anatomy_group_acc_total = 0.0
     anatomy_artery_acc_total = 0.0
@@ -131,23 +95,15 @@ def evaluate(model, dataloader, device):
         image = batch["image"].to(device, dtype=torch.float32)
         vessel_mask = batch["vessel_mask"].to(device, dtype=torch.float32)
         anatomy_mask = batch["anatomy_mask"].to(device, dtype=torch.long)
-        stenosis_mask = batch["stenosis_mask"].to(device, dtype=torch.float32)
 
         dev_batch = {
             "vessel_mask": vessel_mask,
             "anatomy_mask": anatomy_mask,
-            "stenosis_mask": stenosis_mask,
         }
         outputs = model(image)
 
-        precision, recall = stenosis_precision_recall(outputs["stenosis"], stenosis_mask)
-
         total_loss += compute_loss(outputs, dev_batch)
         vessel_dice_total += dice_score(outputs["vessel"], vessel_mask)
-        stenosis_dice_total += dice_score(outputs["stenosis"], stenosis_mask)
-        stenosis_soft_dice_total += soft_dice_score(outputs["stenosis"], stenosis_mask)
-        stenosis_precision_total += precision
-        stenosis_recall_total += recall
         anatomy_acc_total += anatomy_accuracy(outputs["anatomy"], anatomy_mask)
         anatomy_group_acc_total += mapped_accuracy(outputs["anatomy"], anatomy_mask, SEGMENT_TO_GROUP_ID, device)
         anatomy_artery_acc_total += mapped_accuracy(outputs["anatomy"], anatomy_mask, SEGMENT_TO_ARTERY_ID, device)
@@ -159,10 +115,6 @@ def evaluate(model, dataloader, device):
         "anatomy_acc": anatomy_acc_total / n,
         "anatomy_group_acc": anatomy_group_acc_total / n,
         "anatomy_artery_acc": anatomy_artery_acc_total / n,
-        "stenosis_dice": stenosis_dice_total / n,
-        "stenosis_soft_dice": stenosis_soft_dice_total / n,
-        "stenosis_precision": stenosis_precision_total / n,
-        "stenosis_recall": stenosis_recall_total / n,
     }
 
 
@@ -198,7 +150,8 @@ if __name__ == "__main__":
 
     model = MultiTaskMobileUNetv3(n_anatomy_classes=NUM_ANATOMY_CLASSES, pretrained=False).to(device)
     state = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(state)
+    # strict=False: older checkpoints may still contain a now-removed stenosis_head
+    model.load_state_dict(state, strict=False)
     print(f"Checkpoint: {args.checkpoint}\n")
 
     metrics = evaluate(model, loader, device)
@@ -211,8 +164,4 @@ if __name__ == "__main__":
     print(f"  Anatomy Acc (segment):  {metrics['anatomy_acc']:.4f}  <- 25 SYNTAX segments")
     print(f"  Anatomy Acc (group):    {metrics['anatomy_group_acc']:.4f}  <- e.g. LAD proximal, RCA mid")
     print(f"  Anatomy Acc (artery):   {metrics['anatomy_artery_acc']:.4f}  <- RCA / LAD / LCX / LM")
-    print(f"  Stenosis Dice:          {metrics['stenosis_dice']:.4f}")
-    print(f"  Stenosis Soft Dice:     {metrics['stenosis_soft_dice']:.4f}")
-    print(f"  Stenosis Precision:     {metrics['stenosis_precision']:.4f}")
-    print(f"  Stenosis Recall:        {metrics['stenosis_recall']:.4f}")
     print("=" * 50)

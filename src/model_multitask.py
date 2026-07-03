@@ -44,7 +44,6 @@ class MultiTaskMobileUNetv3(nn.Module):
 
         self.vessel_head = nn.Conv2d(32, 1, kernel_size=1)
         self.anatomy_head = nn.Conv2d(32, n_anatomy_classes, kernel_size=1)
-        self.stenosis_head = nn.Conv2d(32, 1, kernel_size=1)
 
     def forward(self, x):
         x_0 = self.encoder[0:2](x)
@@ -71,7 +70,6 @@ class MultiTaskMobileUNetv3(nn.Module):
         return {
             "vessel": self.vessel_head(d5),
             "anatomy": self.anatomy_head(d5),
-            "stenosis": self.stenosis_head(d5),
             "features": x_4,
         }
 
@@ -89,4 +87,3 @@ if __name__ == "__main__":
     y = model(x)
     print("vessel:", tuple(y["vessel"].shape))
     print("anatomy:", tuple(y["anatomy"].shape))
-    print("stenosis:", tuple(y["stenosis"].shape))

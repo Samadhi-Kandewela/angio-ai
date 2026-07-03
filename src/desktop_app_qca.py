@@ -204,7 +204,8 @@ class VideoThread(QThread):
 
             device = torch.device('cpu')
             model = MultiTaskMobileUNetv3(pretrained=False)
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            # strict=False: older checkpoints may still contain a now-removed stenosis_head
+            model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
             model.eval()
             self._loc_torch_model = model
             return True

@@ -5,9 +5,13 @@ Reads only SYNTAX annotations (no stenosis needed).
 
 Returns:
   vessel_mask : float tensor (1, H, W)  — binary vessel mask  (MODEL INPUT)
-  anatomy_mask: long  tensor (H, W)     — per-pixel SYNTAX segment 0..25 (TARGET)
+  anatomy_mask: long  tensor (H, W)     — per-pixel merged segment 0..14 (TARGET)
   file_name   : str
   orig_size   : (H, W)
+
+Raw 1-25 SYNTAX segment ids are collapsed to the 14-class merged scheme
+(see localization_labels.SEGMENT_MERGE_MAP) before being returned, since rare
+side-branch classes are not learnable from this dataset's support counts.
 """
 
 import json
@@ -20,7 +24,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from localization_labels import STENOSIS_CATEGORY_ID
+from localization_labels import STENOSIS_CATEGORY_ID, RAW_TO_MERGED_ID, MERGED_NUM_ANATOMY_CLASSES
+
+_RAW_TO_MERGED_LUT = np.array(RAW_TO_MERGED_ID, dtype=np.uint8)
 
 
 class MaskLocalizationDataset(Dataset):
@@ -122,7 +128,7 @@ class MaskLocalizationDataset(Dataset):
             if category_id <= 0 or category_id >= STENOSIS_CATEGORY_ID:
                 continue
             self._fill_annotation(mask, ann, category_id)
-        return mask
+        return _RAW_TO_MERGED_LUT[mask]
 
     @staticmethod
     def _apply_mask_noise(vessel_mask):
@@ -148,7 +154,9 @@ class MaskLocalizationDataset(Dataset):
             poly = np.round(poly).astype(np.int32)
             cv2.fillPoly(mask, [poly], value)
 
-    def estimate_anatomy_pixel_counts(self, num_classes=26, max_samples=None):
+    def estimate_anatomy_pixel_counts(self, num_classes=None, max_samples=None):
+        if num_classes is None:
+            num_classes = MERGED_NUM_ANATOMY_CLASSES
         counts = np.zeros(num_classes, dtype=np.float64)
         images = self.images if max_samples is None else self.images[:max_samples]
         for info in images:

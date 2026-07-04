@@ -34,9 +34,9 @@ if SRC_DIR not in sys.path:
 
 from dataset_mask_localization import MaskLocalizationDataset
 from localization_labels import (
-    NUM_ANATOMY_CLASSES,
-    SEGMENT_TO_ARTERY_ID,
-    SEGMENT_TO_GROUP_ID,
+    MERGED_NUM_ANATOMY_CLASSES as NUM_ANATOMY_CLASSES,
+    MERGED_SEGMENT_TO_ARTERY_ID as SEGMENT_TO_ARTERY_ID,
+    MERGED_SEGMENT_TO_GROUP_ID as SEGMENT_TO_GROUP_ID,
 )
 from model_mask_localization import MaskLocalizationNet
 

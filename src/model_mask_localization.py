@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
 
-from localization_labels import NUM_ANATOMY_CLASSES
+from localization_labels import MERGED_NUM_ANATOMY_CLASSES as NUM_ANATOMY_CLASSES
 from model_lightweight import CBAM, DoubleDSConv
 
 

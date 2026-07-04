@@ -1,7 +1,0 @@
-{
-  "input_obj": "dicom_pipeline_output_v2\\pipeline_hybrid_qca_tree.obj",
-  "output_obj": "dicom_pipeline_output_v2\\pipeline_hybrid_qca_tree_smoothed.obj",
-  "branches": 15,
-  "junction_blend_nodes": 8,
-  "report": "dicom_pipeline_output_v2\\smoothed_junction_radius_report.csv"
-}

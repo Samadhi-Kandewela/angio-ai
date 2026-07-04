@@ -791,6 +791,9 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
             "branch_smooth":   branch_s,
             "confidence":      confidence,
             "method":          method,
+            "edge_sharpness":  round(float(edge_sharpness), 3),
+            "ref_quality":     round(float(ref_quality), 3),
+            "len_score":       round(float(len_score), 3),
         })
 
     # Merge overlapping lesions on this branch
@@ -961,6 +964,93 @@ def save_diameter_plot(out_path: Path, branches: List[List[Tuple[int,int]]],
     plt.savefig(out_path, dpi=150)
     plt.close()
 
+def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
+                        les: dict, cfg: QCAConfig, title: str,
+                        heatmap: Optional[np.ndarray] = None) -> "plt.Figure":
+    """
+    Builds the 3-panel explainable figure (cropped angiogram, width heatmap,
+    localized diameter profile) for a single lesion. Returns an open
+    matplotlib Figure — caller is responsible for saving/embedding and closing it.
+
+    `heatmap` may be passed in precomputed (BGR colormap of the full-frame
+    distance transform) to avoid recomputing it per lesion when called in a loop
+    over several lesions from the same frame; otherwise it's derived from `dt`.
+    """
+    if heatmap is None:
+        dt_norm = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        heatmap = cv2.applyColorMap(dt_norm, cv2.COLORMAP_JET)
+
+    if angio.ndim == 2:
+        angio_bgr = cv2.cvtColor(angio, cv2.COLOR_GRAY2BGR)
+    else:
+        angio_bgr = angio.copy()
+
+    branch = les["branch"]
+    L, R = les["L_idx"], les["R_idx"]
+    m_idx = les["min_idx"]
+
+    y0, x0 = les["min_pt"]
+    crop_size = 80
+    H, W = angio.shape[:2]
+
+    y1, y2 = max(0, y0 - crop_size), min(H, y0 + crop_size)
+    x1, x2 = max(0, x0 - crop_size), min(W, x0 + crop_size)
+
+    patch_angio = angio_bgr[y1:y2, x1:x2].copy()
+    patch_heat = heatmap[y1:y2, x1:x2].copy()
+    patch_mask = mask[y1:y2, x1:x2]
+
+    patch_heat[patch_mask == 0] = patch_angio[patch_mask == 0]
+    patch_blended = cv2.addWeighted(patch_angio, 0.4, patch_heat, 0.6, 0)
+
+    for (py, px) in branch[L:R+1]:
+        if y1 <= py < y2 and x1 <= px < x2:
+            cv2.circle(patch_angio, (px - x1, py - y1), 1, (0, 0, 255), -1)
+            cv2.circle(patch_blended, (px - x1, py - y1), 1, (255, 255, 255), -1)
+
+    pad = 60
+    disp_L = max(0, L - pad)
+    disp_R = min(len(branch) - 1, R + pad)
+
+    d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
+    d_s = smooth_1d(d_raw, cfg.smooth_win)
+
+    fig = plt.figure(figsize=(14, 5))
+
+    ax1 = plt.subplot(1, 3, 1)
+    ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
+    ax1.set_title("Lesion Angiogram")
+    ax1.axis('off')
+
+    ax2 = plt.subplot(1, 3, 2)
+    ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
+    ax2.set_title("Width Heatmap (Red=Wide, Blue=Narrow)")
+    ax2.axis('off')
+
+    ax3 = plt.subplot(1, 3, 3)
+    region_raw = d_raw[disp_L:disp_R+1]
+    region_smooth = d_s[disp_L:disp_R+1]
+    x_axis = range(disp_L, disp_R+1)
+
+    ax3.plot(x_axis, region_raw, alpha=0.4, color='gray', label="Raw DT Width")
+    ax3.plot(x_axis, region_smooth, color='blue', label="Smoothed Width")
+    ax3.axvspan(L, R, alpha=0.2, color="red", label="Stenosis Region")
+    ax3.axhline(les["RVD_px"], color='green', linestyle='--', label=f"RVD: {les['RVD_px']:.1f}px")
+    ax3.plot(m_idx, les["MLD_px"], 'rv', markersize=8, label=f"MLD: {les['MLD_px']:.1f}px")
+    ax3.set_title("Local Diameter Profile")
+    ax3.set_ylabel("Diameter (pixels)")
+    ax3.legend(fontsize=9)
+
+    occ_str = " [TOTAL OCCLUSION]" if les.get("total_occlusion") else ""
+    conf_str = f"  conf={les.get('confidence', '?')}  method={les.get('method', '?')}"
+    fig.suptitle(
+        f"{title} | {les['DS_percent']:.1f}% DS ({les['severity']}){occ_str}{conf_str}",
+        fontsize=14, fontweight='bold'
+    )
+    plt.tight_layout()
+    return fig
+
+
 def save_explainable_report(out_dir: Path, stem: str, angio: np.ndarray, mask: np.ndarray,
                             branches: List[List[Tuple[int,int]]], lesions: List[dict],
                             dt: np.ndarray, cfg: QCAConfig, top_k: int = 3):
@@ -974,76 +1064,8 @@ def save_explainable_report(out_dir: Path, stem: str, angio: np.ndarray, mask: n
     dt_norm = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     heatmap = cv2.applyColorMap(dt_norm, cv2.COLORMAP_JET)
 
-    if angio.ndim == 2:
-        angio_bgr = cv2.cvtColor(angio, cv2.COLOR_GRAY2BGR)
-    else:
-        angio_bgr = angio.copy()
-
     for k, les in enumerate(lesions[:top_k], start=1):
-        branch = les["branch"]
-        L, R = les["L_idx"], les["R_idx"]
-        m_idx = les["min_idx"]
-
-        y0, x0 = les["min_pt"]
-        crop_size = 80
-        H, W = angio.shape[:2]
-
-        y1, y2 = max(0, y0 - crop_size), min(H, y0 + crop_size)
-        x1, x2 = max(0, x0 - crop_size), min(W, x0 + crop_size)
-
-        patch_angio = angio_bgr[y1:y2, x1:x2].copy()
-        patch_heat = heatmap[y1:y2, x1:x2].copy()
-        patch_mask = mask[y1:y2, x1:x2]
-
-        patch_heat[patch_mask == 0] = patch_angio[patch_mask == 0]
-        patch_blended = cv2.addWeighted(patch_angio, 0.4, patch_heat, 0.6, 0)
-
-        for (py, px) in branch[L:R+1]:
-            if y1 <= py < y2 and x1 <= px < x2:
-                cv2.circle(patch_angio, (px - x1, py - y1), 1, (0, 0, 255), -1)
-                cv2.circle(patch_blended, (px - x1, py - y1), 1, (255, 255, 255), -1)
-
-        pad = 60
-        disp_L = max(0, L - pad)
-        disp_R = min(len(branch) - 1, R + pad)
-
-        d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
-        d_s = smooth_1d(d_raw, cfg.smooth_win)
-
-        fig = plt.figure(figsize=(14, 5))
-
-        ax1 = plt.subplot(1, 3, 1)
-        ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
-        ax1.set_title(f"Lesion #{k} Angiogram")
-        ax1.axis('off')
-
-        ax2 = plt.subplot(1, 3, 2)
-        ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
-        ax2.set_title(f"Width Heatmap (Red=Wide, Blue=Narrow)")
-        ax2.axis('off')
-
-        ax3 = plt.subplot(1, 3, 3)
-        region_raw = d_raw[disp_L:disp_R+1]
-        region_smooth = d_s[disp_L:disp_R+1]
-        x_axis = range(disp_L, disp_R+1)
-
-        ax3.plot(x_axis, region_raw, alpha=0.4, color='gray', label="Raw DT Width")
-        ax3.plot(x_axis, region_smooth, color='blue', label="Smoothed Width")
-        ax3.axvspan(L, R, alpha=0.2, color="red", label="Stenosis Region")
-        ax3.axhline(les["RVD_px"], color='green', linestyle='--', label=f"RVD: {les['RVD_px']:.1f}px")
-        ax3.plot(m_idx, les["MLD_px"], 'rv', markersize=8, label=f"MLD: {les['MLD_px']:.1f}px")
-        ax3.set_title("Local Diameter Profile")
-        ax3.set_ylabel("Diameter (pixels)")
-        ax3.legend(fontsize=9)
-
-        occ_str = " [TOTAL OCCLUSION]" if les.get("total_occlusion") else ""
-        conf_str = f"  conf={les.get('confidence', '?')}  method={les.get('method', '?')}"
-        fig.suptitle(
-            f"{stem} - Lesion #{k} | {les['DS_percent']:.1f}% DS ({les['severity']}){occ_str}{conf_str}",
-            fontsize=14, fontweight='bold'
-        )
-
-        plt.tight_layout()
+        fig = build_lesion_figure(angio, mask, dt, les, cfg, f"{stem} - Lesion #{k}", heatmap=heatmap)
         report_path = out_dir / f"{stem}_lesion_{k}_report.png"
         plt.savefig(report_path, dpi=150, bbox_inches='tight')
         plt.close(fig)

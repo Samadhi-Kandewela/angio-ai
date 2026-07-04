@@ -137,7 +137,7 @@ dmypy.json
 # Project-specific Data & Checkpoints
 dataset/
 dataset_augmented/
-checkpoints/
+# checkpoints/
 local_data/
 wandb/
 exports/
@@ -205,3 +205,27 @@ plot_*.py
 /ECG/first_successful_implementation/
 /ECG/MI images/
 /ECG/papers/
+
+# Reconstruction / intermediate debug folders
+/dicom_3d_connected/
+/dicom_3d_filtered/
+/dicom_3d_optimized/
+/dicom_3d_rough/
+/dicom_3d_topology/
+/dicom_centerlines/
+/dicom_pipeline_output/
+/dicom_pipeline_output_v2/
+/dicom_preview/
+/dicom_selected_segmentation/
+
+# Local outputs / debug folders
+/src/ecg_output/
+/src/qca2_out/
+/src/qca_outputs_single/
+/src/qca_validation/
+
+# Allow specific checkpoints/models to be tracked/pushed
+!/checkpoints/
+/checkpoints/**/*.zip
+!/checkpoints/**/*.onnx
+!/checkpoints/**/*.pth

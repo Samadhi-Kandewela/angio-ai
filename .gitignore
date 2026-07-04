@@ -7,6 +7,10 @@ __pycache__/
 *.so
 
 #3d middle folders/
+3d angio/
+instances_default.json
+
+dicom_case003*
 dicom_auto_selection/
 dicom_auto_selection_fast/
 dicom_auto_selection_final/
@@ -33,6 +37,8 @@ dicom_ranked_reconstructions/
 dicom_full_tree_hybrid/
 dicom_2d_reference_trees/
 dicom_case_3d_reconstructions/
+dicom_case_plan*/
+dicom_case_reconstruction*/
 
 # Distribution / packaging
 angio only/

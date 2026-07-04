@@ -212,6 +212,7 @@ def draw_overlay(
     projected_by_branch: Dict[int, np.ndarray],
     rows: List[Dict[str, object]],
     output_path: Path,
+    visible_branch_ids: set[int] | None = None,
 ):
     if original.ndim == 2:
         canvas = cv2.cvtColor(original, cv2.COLOR_GRAY2BGR)
@@ -231,6 +232,8 @@ def draw_overlay(
         "bad": (0, 0, 255),
     }
     for branch_id, points in projected_by_branch.items():
+        if visible_branch_ids is not None and branch_id not in visible_branch_ids:
+            continue
         row = row_by_branch.get(branch_id, {})
         color = colors.get(str(row.get("validation_status", "bad")), (0, 0, 255))
         finite = np.isfinite(points).all(axis=1)
@@ -291,7 +294,34 @@ def validate_view(
             }
         )
 
+    passing_ids = {
+        int(row["branch_id"])
+        for row in rows
+        if row["validation_status"] in {"good", "review"}
+    }
+    supported_ids = {
+        int(row["branch_id"])
+        for row in rows
+        if row["branch_status"] in {"reliable", "usable"}
+    }
+
     draw_overlay(original, mask, projected_by_branch, rows, output_dir / f"{view_key}_reprojection_validation.png")
+    draw_overlay(
+        original,
+        mask,
+        projected_by_branch,
+        rows,
+        output_dir / f"{view_key}_passing_reprojection_validation.png",
+        passing_ids,
+    )
+    draw_overlay(
+        original,
+        mask,
+        projected_by_branch,
+        rows,
+        output_dir / f"{view_key}_supported_reprojection_validation.png",
+        supported_ids,
+    )
     summary = {
         "best_orientation": best_orientation,
         "orientation_scores": orientation_scores,
@@ -300,6 +330,8 @@ def validate_view(
         "good_branches": int(sum(row["validation_status"] == "good" for row in rows)),
         "review_branches": int(sum(row["validation_status"] == "review" for row in rows)),
         "bad_branches": int(sum(row["validation_status"] == "bad" for row in rows)),
+        "passing_branch_ids": sorted(passing_ids),
+        "supported_branch_ids": sorted(supported_ids),
     }
     return rows, summary
 
@@ -327,6 +359,8 @@ def write_markdown(path: Path, summary: Dict[str, object], csv_name: str):
                 f"- P90 branch error: `{view_summary['p90_branch_error_px']:.2f}` px",
                 f"- Good / review / bad branches: `{view_summary['good_branches']} / {view_summary['review_branches']} / {view_summary['bad_branches']}`",
                 f"- Overlay: `{view_key}_reprojection_validation.png`",
+                f"- Passing-only overlay: `{view_key}_passing_reprojection_validation.png`",
+                f"- Two-view-supported overlay: `{view_key}_supported_reprojection_validation.png`",
                 "",
             ]
         )
@@ -338,6 +372,8 @@ def write_markdown(path: Path, summary: Dict[str, object], csv_name: str):
             "- Green centerline: good reprojection.",
             "- Yellow centerline: needs review.",
             "- Red centerline: bad reprojection.",
+            "- Passing-only overlays hide bad outlier branches.",
+            "- Two-view-supported overlays show only branches accepted as reliable/usable by the 3D matching stage.",
             "",
             "A clinically accurate 3D reconstruction should have low reprojection error in both views, especially around bifurcations and stenosis regions.",
         ]
@@ -413,6 +449,10 @@ def main():
             "markdown": str(output_dir / "reprojection_validation_report.md"),
             "view_a_overlay": str(output_dir / "view_a_reprojection_validation.png"),
             "view_b_overlay": str(output_dir / "view_b_reprojection_validation.png"),
+            "view_a_passing_overlay": str(output_dir / "view_a_passing_reprojection_validation.png"),
+            "view_b_passing_overlay": str(output_dir / "view_b_passing_reprojection_validation.png"),
+            "view_a_supported_overlay": str(output_dir / "view_a_supported_reprojection_validation.png"),
+            "view_b_supported_overlay": str(output_dir / "view_b_supported_reprojection_validation.png"),
         },
     }
     with open(output_dir / "reprojection_validation_summary.json", "w", encoding="utf-8") as f:

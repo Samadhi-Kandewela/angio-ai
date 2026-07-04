@@ -432,13 +432,13 @@ def build_mesh(matches, dt_a, out_dir: Path, mag_factor: float):
         # visual continuity. Stereo-supported branches inform depth and quality;
         # weak branches are kept but depth-clamped rather than discarded.
         coords = resample_polyline(branch["centerline_yx"], min(64, max(20, branch["points"])))
-        xy = yx_to_xy(coords)
-        z = depth_model(coords)[:, 2]
+        points = depth_model(coords)
+        z = points[:, 2]
         if status == "single_view_preserved":
             z = np.clip(z, z_low, z_high)
         else:
             z = np.clip(z, z_low - 6.0, z_high + 6.0)
-        points = np.column_stack([xy, z])
+        points[:, 2] = z
 
         y = np.clip(np.rint(coords[:, 0]).astype(int), 0, 511)
         x = np.clip(np.rint(coords[:, 1]).astype(int), 0, 511)

@@ -17,4 +17,5 @@ scikit-image
 onnx
 thop
 graphviz
+pydicom
 adjustText

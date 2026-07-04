@@ -74,6 +74,10 @@ def copy_final_artifacts(final_dir: Path, validation_dir: Path, output_dir: Path
         "reprojection_validation_summary.json",
         "view_a_reprojection_validation.png",
         "view_b_reprojection_validation.png",
+        "view_a_passing_reprojection_validation.png",
+        "view_b_passing_reprojection_validation.png",
+        "view_a_supported_reprojection_validation.png",
+        "view_b_supported_reprojection_validation.png",
     ):
         source = validation_dir / name
         if source.exists():
@@ -250,6 +254,10 @@ def main():
             "validation_report": str(out / "final_reprojection_validation_report.md"),
             "view_a_validation_overlay": str(out / "final_view_a_reprojection_validation.png"),
             "view_b_validation_overlay": str(out / "final_view_b_reprojection_validation.png"),
+            "view_a_passing_validation_overlay": str(out / "final_view_a_passing_reprojection_validation.png"),
+            "view_b_passing_validation_overlay": str(out / "final_view_b_passing_reprojection_validation.png"),
+            "view_a_supported_validation_overlay": str(out / "final_view_a_supported_reprojection_validation.png"),
+            "view_b_supported_validation_overlay": str(out / "final_view_b_supported_reprojection_validation.png"),
         },
         "viewer_command": f"python src\\artery_3d_vtk_viewer.py --obj {out / 'hybrid_smoothed_confidence_colored.obj'}",
     }

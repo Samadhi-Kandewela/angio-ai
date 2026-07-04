@@ -137,7 +137,7 @@ dmypy.json
 # Project-specific Data & Checkpoints
 dataset/
 dataset_augmented/
-checkpoints/
+# checkpoints/
 local_data/
 wandb/
 exports/
@@ -172,3 +172,60 @@ create_architecture_diagram.py
 create_clahe_comparison.py
 generate_*.py
 plot_*.py
+
+# Allow ECG folder and its contents (override global ignores like *.png, *.md, *.pth)
+!/ECG/
+!/ECG/**
+
+# Explicitly ignore large or runtime folders inside ECG
+/ECG/venv/
+/ECG/dataset/
+/ECG/runs/
+/ECG/sample_results/
+/ECG/**/__pycache__/
+/ECG/ecg-image-kit/sample-data/
+/ECG/ecg-image-kit/codes/ecg-image-generator/SampleData/
+/ECG/**/*.pdf
+/ECG/**/*.npy
+/ECG/**/*.csv
+/ECG/**/*_results/
+
+/ECG/2409.16612v1.pdf
+/ECG/2409.16612v1.md
+/ECG/CLAUDE.md
+/ECG/paper2_text.txt
+/ECG/pdf_text.txt
+/ECG/s41598-022-25284-1.md
+/ECG/s41598-022-25284-1.pdf
+
+# Ignore additional unnecessary ECG files/folders
+/ECG/checkpoints/history.json
+/ECG/checkpoints/training_history.png
+/ECG/ecg-12-lead-model/pipeline_outputs/
+/ECG/first_successful_implementation/
+/ECG/MI images/
+/ECG/papers/
+
+# Reconstruction / intermediate debug folders
+/dicom_3d_connected/
+/dicom_3d_filtered/
+/dicom_3d_optimized/
+/dicom_3d_rough/
+/dicom_3d_topology/
+/dicom_centerlines/
+/dicom_pipeline_output/
+/dicom_pipeline_output_v2/
+/dicom_preview/
+/dicom_selected_segmentation/
+
+# Local outputs / debug folders
+/src/ecg_output/
+/src/qca2_out/
+/src/qca_outputs_single/
+/src/qca_validation/
+
+# Allow specific checkpoints/models to be tracked/pushed
+!/checkpoints/
+/checkpoints/**/*.zip
+!/checkpoints/**/*.onnx
+!/checkpoints/**/*.pth

@@ -1,6 +1,0 @@
-{
-  "status": "hybrid visual-quality tree",
-  "meaning": "Preserves full IM0 artery-tree shape for doctor-facing visual continuity. Reliable/usable branches use stereo-informed depth; single-view branches are preserved and depth-clamped, not discarded.",
-  "obj": "E:\\Research - Copy\\dicom_3d_filtered\\hybrid_visual_quality_tree.obj",
-  "preview_png": "E:\\Research - Copy\\dicom_3d_filtered\\hybrid_visual_quality_preview.png"
-}

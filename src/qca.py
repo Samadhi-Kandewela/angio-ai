@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 from skimage.morphology import skeletonize
 from scipy.ndimage import distance_transform_edt
+from scipy.interpolate import splprep, splev
 
 
 # =========================
@@ -21,22 +22,32 @@ from scipy.ndimage import distance_transform_edt
 class QCAConfig:
     min_component_pixels: int = 200          # remove tiny mask components
     close_kernel: int = 3                    # morphological closing
-    close_iters: int = 2
+    close_iters: int = 1                     # 1 iter prevents bridging nearby-but-separate vessels
     open_kernel: int = 3                     # morphological opening
     open_iters: int = 1
 
-    prune_spur_len: int = 12                 # prune small skeleton spurs
-    smooth_win: int = 11                     # diameter smoothing (odd recommended)
+    prune_spur_len: int = 6                  # prune skeleton spurs shorter than this (px)
+    smooth_win: int = 9                      # diameter smoothing window (odd); capped adaptively per branch
 
-    lesion_alpha: float = 0.80               # recovery threshold: d >= alpha * RVD_local
+    lesion_alpha: float = 0.82               # boundary threshold: lesion region where d < alpha*RVD
     ref_win_prox: int = 40                   # points before lesion for RVD estimate
     ref_win_dist: int = 40                   # points after lesion for RVD estimate
-    min_lesion_points: int = 5               # ignore tiny lesions on centerline
-    severe_threshold: float = 50.0           # %DS >= severe_threshold -> severe
-    moderate_threshold: float = 30.0         # %DS >= moderate_threshold -> moderate
-    min_branch_len: int = 30                 # minimum branch length (skeleton px) to analyze
+    min_lesion_points: int = 3               # minimum centerline span to count as a lesion
+
+    # Severity thresholds per ACC/AHA/ESC standard and QCA consensus (QCA_CAL.md):
+    #   Normal/Minimal : DS  < 30%
+    #   Mild           : 30% ≤ DS < 50%  — non-obstructive, no intervention
+    #   Moderate       : 50% ≤ DS < 70%  — functionally significant with symptoms
+    #   Severe         : DS ≥ 70%        — intervention indicated regardless of symptoms
+    severe_threshold: float = 70.0
+    moderate_threshold: float = 50.0
+
+    min_branch_len: int = 15                 # minimum branch length (skeleton px) to analyze
 
     px_to_mm: Optional[float] = None         # set if you have calibration (mm per pixel)
+
+    total_occlusion_px_threshold: float = 0.5  # DT at original branch pt below which total occlusion declared
+    stent_mode: bool = False                    # use stent-specific reference window selection
 
 
 # =========================
@@ -64,19 +75,46 @@ def keep_significant_components(bw: np.ndarray, min_pixels: int) -> np.ndarray:
             any_valid = True
 
     if not any_valid:
-        # fallback: keep absolute largest non-background
         largest = 1 + int(np.argmax(areas))
         out = (labels == largest).astype(np.uint8) * 255
     return out
 
 def morph_cleanup(bw: np.ndarray, cfg: QCAConfig) -> np.ndarray:
-    """Close gaps, remove specks, keep all significant vessel components."""
+    """Close gaps, remove specks, keep all significant vessel components.
+
+    Bridge prevention: any pixel that morphological closing adds between two
+    previously-separate components is detected and removed before opening.
+    This stops nearby-but-distinct vessel branches from being merged into a
+    single connected region whose skeleton then contains a thin bridge —
+    which would otherwise be measured as a severe stenosis.
+    """
     k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.close_kernel, cfg.close_kernel))
+    k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.open_kernel,  cfg.open_kernel))
+    dilate_k = np.ones((3, 3), dtype=np.uint8)   # 8-connected dilation kernel
+
+    # Snapshot the original binary mask and its connected components
+    bw_bin = (bw > 0).astype(np.uint8)
+    n_comp, labels_orig = cv2.connectedComponents(bw_bin, connectivity=8)
+    # n_comp includes label 0 (background), so n_comp > 2 means ≥2 foreground pieces
+
+    # Apply morphological closing (fills holes and smooths edges within vessels)
     bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k_close, iterations=cfg.close_iters)
 
-    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (cfg.open_kernel, cfg.open_kernel))
-    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k_open, iterations=cfg.open_iters)
+    # --- Bridge-prevention pass ---
+    # Pixels added by closing that are adjacent to ≥2 different original components
+    # are bridge pixels — they connect separate vessels and must be removed.
+    if n_comp > 2:
+        new_px = (bw > 0) & (bw_bin == 0)     # pixels that closing added
+        if np.any(new_px):
+            # For each original foreground component, dilate it by 1 pixel.
+            # A new pixel "touched" by ≥2 components is a bridge.
+            bridge_count = np.zeros(bw.shape, dtype=np.int32)
+            for i in range(1, n_comp):
+                comp_dilated = cv2.dilate((labels_orig == i).astype(np.uint8), dilate_k)
+                bridge_count += comp_dilated.astype(np.int32)
+            bw[new_px & (bridge_count >= 2)] = 0   # excise bridge pixels
 
+    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, k_open, iterations=cfg.open_iters)
     bw = keep_significant_components(bw, cfg.min_component_pixels)
     return bw
 
@@ -90,13 +128,11 @@ _NEI8 = [(-1, -1), (-1, 0), (-1, 1),
 
 def skeleton_endpoints(skel: np.ndarray) -> List[Tuple[int, int]]:
     """Endpoints = skeleton pixels with exactly 1 neighbor (8-connect) using fast convolution."""
-    # skeleton is 0 or 255. Divide by 255 to get 0 or 1.
     sk = (skel > 0).astype(np.uint8)
     kernel = np.array([[1, 1, 1],
                        [1, 0, 1],
                        [1, 1, 1]], dtype=np.uint8)
     neighbor_count = cv2.filter2D(sk, -1, kernel, borderType=cv2.BORDER_CONSTANT)
-    # Endpoints are where sk == 1 AND neighbor_count == 1
     endpoints_mask = (sk == 1) & (neighbor_count == 1)
     ys, xs = np.where(endpoints_mask)
     return list(zip(ys, xs))
@@ -108,7 +144,6 @@ def skeleton_junctions(skel: np.ndarray) -> List[Tuple[int, int]]:
                        [1, 0, 1],
                        [1, 1, 1]], dtype=np.uint8)
     neighbor_count = cv2.filter2D(sk, -1, kernel, borderType=cv2.BORDER_CONSTANT)
-    # Junctions are where sk == 1 AND neighbor_count >= 3
     junction_mask = (sk == 1) & (neighbor_count >= 3)
     ys, xs = np.where(junction_mask)
     return list(zip(ys, xs))
@@ -117,36 +152,26 @@ def build_adjacency(skel: np.ndarray) -> Dict[Tuple[int,int], List[Tuple[int,int
     """Fast adjacency graph builder using vectorized shifts."""
     sk = (skel > 0)
     ys, xs = np.where(sk)
-    
-    # Map each (y,x) to an integer index for fast lookup
+
     H, W = sk.shape
     idx_map = np.full((H, W), -1, dtype=np.int32)
     idx_map[ys, xs] = np.arange(len(ys))
-    
+
     pts = list(zip(ys, xs))
     adj: Dict[Tuple[int,int], List[Tuple[int,int]]] = {p: [] for p in pts}
-    
+
     for dy, dx in _NEI8:
-        # shifted coordinates
         ny = ys + dy
         nx = xs + dx
-        
-        # valid bounds
         valid = (ny >= 0) & (ny < H) & (nx >= 0) & (nx < W)
-        
-        # filter valid
         v_ys = ys[valid]
         v_xs = xs[valid]
         v_ny = ny[valid]
         v_nx = nx[valid]
-        
-        # check if shifted pixel is also part of skeleton
         is_skel = sk[v_ny, v_nx]
-        
-        # add to adjacency
         for curr_y, curr_x, n_y, n_x in zip(v_ys[is_skel], v_xs[is_skel], v_ny[is_skel], v_nx[is_skel]):
             adj[(curr_y, curr_x)].append((n_y, n_x))
-            
+
     return adj
 
 def bfs_farthest(adj: Dict[Tuple[int,int], List[Tuple[int,int]]],
@@ -196,7 +221,6 @@ def prune_spurs(skel: np.ndarray, max_len: int) -> np.ndarray:
         for ep in endpoints:
             if ep not in sset:
                 continue
-            # walk from endpoint
             path = [ep]
             prev = None
             cur = ep
@@ -204,27 +228,22 @@ def prune_spurs(skel: np.ndarray, max_len: int) -> np.ndarray:
                 nbrs = adj.get(cur, [])
                 deg = len(nbrs)
                 if deg >= 3 and cur != ep:
-                    break  # junction reached
-                # choose next node not equal prev
+                    break
                 next_nodes = [n for n in nbrs if n != prev]
                 if not next_nodes:
                     break
                 nxt = next_nodes[0]
                 path.append(nxt)
                 prev, cur = cur, nxt
-                # stop if too long
                 if len(path) > max_len:
                     path = []
                     break
 
             if path and 2 <= len(path) <= max_len:
-                # remove spur pixels except the junction pixel (last one) if it is junction
                 for (y, x) in path[:-1]:
                     sk[y, x] = 0
                 changed = True
     return sk
-
-# skeleton_junctions moved above
 
 def extract_all_branches(skel: np.ndarray, min_branch_len: int) -> List[List[Tuple[int, int]]]:
     """
@@ -236,18 +255,15 @@ def extract_all_branches(skel: np.ndarray, min_branch_len: int) -> List[List[Tup
     if not adj:
         return []
 
-    # classify node degrees
     degree = {}
     for node, nbrs in adj.items():
         degree[node] = len(nbrs)
 
-    # walk from each endpoint or junction neighbor to trace branches
-    visited_edges = set()  # frozenset pairs
+    visited_edges = set()
     branches = []
 
     start_nodes = [n for n, d in degree.items() if d == 1 or d >= 3]
     if not start_nodes:
-        # no junctions or endpoints (a loop) — use any node, trace whole thing
         start_nodes = [list(adj.keys())[0]]
 
     for start in start_nodes:
@@ -256,7 +272,6 @@ def extract_all_branches(skel: np.ndarray, min_branch_len: int) -> List[List[Tup
             if edge_key in visited_edges:
                 continue
 
-            # trace from start through nbr until we hit another junction/endpoint
             path = [start, nbr]
             visited_edges.add(edge_key)
             prev, cur = start, nbr
@@ -276,7 +291,6 @@ def extract_all_branches(skel: np.ndarray, min_branch_len: int) -> List[List[Tup
             if len(path) >= min_branch_len:
                 branches.append(path)
 
-    # If no branch extracted (very simple skeleton), fall back to longest path
     if not branches:
         nodes = list(adj.keys())
         if len(nodes) >= 10:
@@ -296,26 +310,23 @@ def ordered_centerline_from_mask(bw_mask: np.ndarray, cfg: QCAConfig) -> List[Tu
     Optimized: Crops the mask to the bounding box of the vessel before skeletonization.
     Returns ordered list of (y,x) points.
     """
-    # 1. Find bounding box of the mask to crop it
     ys, xs = np.where(bw_mask > 0)
     if len(ys) == 0:
         raise RuntimeError("Mask is empty.")
-        
+
     y_min, y_max = np.min(ys), np.max(ys)
     x_min, x_max = np.min(xs), np.max(xs)
-    
+
     pad = 10
     H, W = bw_mask.shape
     y1, y2 = max(0, y_min - pad), min(H, y_max + pad + 1)
     x1, x2 = max(0, x_min - pad), min(W, x_max + pad + 1)
-    
-    # Process only cropped region
+
     cropped_mask = bw_mask[y1:y2, x1:x2]
-    
+
     cr_skel = skeletonize((cropped_mask > 0)).astype(np.uint8)
     cr_skel = prune_spurs(cr_skel, cfg.prune_spur_len)
-    
-    # Restore full sizes
+
     skel = np.zeros_like(bw_mask)
     skel[y1:y2, x1:x2] = cr_skel
 
@@ -343,7 +354,7 @@ def get_skeleton_from_mask(bw_mask: np.ndarray, cfg: QCAConfig) -> np.ndarray:
 
 
 # =========================
-# QCA: diameter profile + lesion metrics
+# QCA: core signal helpers
 # =========================
 def smooth_1d(x: np.ndarray, win: int) -> np.ndarray:
     if win <= 1:
@@ -368,72 +379,387 @@ def arc_length(centerline: List[Tuple[int,int]], L: int, R: int) -> float:
         return 0.0
     pts = np.array(centerline[L:R+1])
     diffs = np.diff(pts, axis=0)
-    # diffs is roughly (N-1, 2) shaped [dy, dx]
-    # distance = sqrt(dy^2 + dx^2)
     distances = np.linalg.norm(diffs, axis=1)
     return float(np.sum(distances))
 
-def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray, cfg: QCAConfig) -> List[dict]:
-    """
-    Run lesion detection on a single branch centerline.
-    dt is the distance transform of the full mask.
-    Returns list of lesion dicts (with branch-local indices AND absolute (y,x) coords).
-    """
-    N = len(branch)
-    d_raw = np.zeros(N, dtype=np.float32)
-    for i, (y, x) in enumerate(branch):
-        d_raw[i] = 2.0 * dt[y, x]
 
-    d_s = smooth_1d(d_raw, cfg.smooth_win)
-    minima = local_minima_indices(d_s)
+# =========================
+# V6 Enhancement Functions
+# =========================
+
+def _tapered_rvd(d_s: np.ndarray, L: int, R: int, m: int,
+                 prox_win: int, dist_win: int) -> float:
+    """
+    Compute tapered (position-interpolated) RVD from proximal and distal
+    reference windows. Handles tapering vessels more accurately than flat average.
+    """
+    N = len(d_s)
+    pL = max(0, L - prox_win)
+    pR = max(0, L - 1)
+    dL = min(N - 1, R + 1)
+    dR = min(N - 1, R + dist_win)
+
+    prox_pts = d_s[pL:pR + 1]
+    dist_pts = d_s[dL:dR + 1]
+
+    RVD_prox = float(np.percentile(prox_pts, 80)) if len(prox_pts) >= 3 else None
+    RVD_dist = float(np.percentile(dist_pts, 80)) if len(dist_pts) >= 3 else None
+
+    if RVD_prox is None and RVD_dist is None:
+        return 0.0
+    if RVD_prox is None:
+        return RVD_dist
+    if RVD_dist is None:
+        return RVD_prox
+
+    span = (R - L) if R > L else 1
+    t = max(0.0, min(1.0, (m - L) / span))
+    return (1.0 - t) * RVD_prox + t * RVD_dist
+
+
+def smooth_centerline_spline(branch: List[Tuple[int, int]],
+                              smoothing: float = 3.0,
+                              num_pts: Optional[int] = None) -> List[Tuple[int, int]]:
+    """
+    Fit a parametric cubic spline through branch pixel coordinates and
+    re-sample at the same number of points. Reduces jagged centerline
+    artifacts that inflate diameter noise.
+    Falls back to original branch if spline fitting fails (< 6 pts).
+    """
+    if len(branch) < 6:
+        return branch
+    ys = np.array([p[0] for p in branch], dtype=float)
+    xs = np.array([p[1] for p in branch], dtype=float)
+    try:
+        tck, u = splprep([xs, ys], s=smoothing * len(branch), k=3)
+        n_out = num_pts or len(branch)
+        u_new = np.linspace(0, 1, n_out)
+        xs_s, ys_s = splev(u_new, tck)
+        return [(int(round(y)), int(round(x))) for x, y in zip(xs_s, ys_s)]
+    except Exception:
+        return branch
+
+
+def _tangent_at(branch_arr: np.ndarray, idx: int) -> np.ndarray:
+    """Unit tangent vector at index idx using central differences (window ±3)."""
+    n = len(branch_arr)
+    lo = max(0, idx - 3)
+    hi = min(n - 1, idx + 3)
+    vec = branch_arr[hi] - branch_arr[lo]
+    norm = np.linalg.norm(vec)
+    if norm < 1e-6:
+        return np.array([1.0, 0.0])
+    return vec / norm
+
+
+def orthogonal_diameter(mask: np.ndarray, branch_arr: np.ndarray,
+                        idx: int, max_radius: int = 40) -> float:
+    """
+    Cast two rays perpendicular to the centerline tangent and measure where
+    they exit the vessel mask. Returns diameter in pixels.
+
+    Handles spline-smoothed centerlines that may drift slightly off the binary
+    mask by snapping the starting pixel to the nearest vessel pixel before
+    casting rays. Without this, an off-mask start gives MLD = 1 (both rays
+    exit immediately), which falsely triggers total-occlusion detection.
+    """
+    cy, cx = branch_arr[idx]
+    cy_i, cx_i = int(round(cy)), int(round(cx))
+
+    # Snap starting pixel to nearest vessel pixel (handles spline drift off mask)
+    if not (0 <= cy_i < mask.shape[0] and 0 <= cx_i < mask.shape[1]
+            and mask[cy_i, cx_i] > 0):
+        found = False
+        for r in range(1, 8):
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    if abs(dy) != r and abs(dx) != r:
+                        continue  # only check the perimeter of each ring
+                    ny2, nx2 = cy_i + dy, cx_i + dx
+                    if (0 <= ny2 < mask.shape[0] and 0 <= nx2 < mask.shape[1]
+                            and mask[ny2, nx2] > 0):
+                        cy_i, cx_i = ny2, nx2
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                break
+
+    tang = _tangent_at(branch_arr, idx)   # (dy, dx) in (y,x) space
+    perp_y, perp_x = -tang[1], tang[0]   # perpendicular direction
+
+    def cast(dy: float, dx: float) -> int:
+        for r in range(1, max_radius + 1):
+            iy = int(round(cy_i + dy * r))
+            ix = int(round(cx_i + dx * r))
+            if iy < 0 or iy >= mask.shape[0] or ix < 0 or ix >= mask.shape[1]:
+                return r - 1
+            if mask[iy, ix] == 0:
+                return r - 1
+        return max_radius
+
+    r1 = cast(perp_y, perp_x)
+    r2 = cast(-perp_y, -perp_x)
+    return float(r1 + r2 + 1)
+
+
+def refine_diameter_subpixel(angio_gray: np.ndarray, mask: np.ndarray,
+                              branch_arr: np.ndarray, idx: int,
+                              rough_radius: float, search_extra: int = 4) -> float:
+    """
+    Refine diameter at a centerline point by sampling the angiogram intensity
+    gradient along the perpendicular direction. Provides sub-pixel accuracy
+    at the vessel wall. Falls back to rough_radius if angio_gray is None.
+    """
+    if angio_gray is None:
+        return rough_radius
+
+    cy, cx = branch_arr[idx]
+    tang = _tangent_at(branch_arr, idx)
+    ny, nx = -tang[1], tang[0]
+    half = int(math.ceil(rough_radius / 2)) + search_extra
+
+    def sample_profile(dy: float, dx: float) -> np.ndarray:
+        vals = []
+        for r in range(half + 1):
+            iy = int(round(cy + dy * r))
+            ix = int(round(cx + dx * r))
+            if 0 <= iy < angio_gray.shape[0] and 0 <= ix < angio_gray.shape[1]:
+                vals.append(float(angio_gray[iy, ix]))
+            else:
+                vals.append(0.0)
+        return np.array(vals)
+
+    def edge_pos(profile: np.ndarray) -> float:
+        g = np.abs(np.gradient(profile))
+        return float(np.argmax(g))
+
+    p1 = sample_profile(ny, nx)
+    p2 = sample_profile(-ny, -nx)
+    return edge_pos(p1) + edge_pos(p2) + 1.0
+
+
+def curvature_derivative_gate(d_s: np.ndarray, minima: List[int],
+                               min_slope_ratio: float = 0.05) -> List[int]:
+    """
+    Keep only minima with a clear negative slope before and positive recovery
+    after. Removes flat-profile false positives where no real stenosis exists.
+    """
+    grad = np.gradient(d_s.astype(float))
+    gated = []
+    for m in minima:
+        lo = max(0, m - 5)
+        pre_slope = float(np.mean(grad[lo:m])) if m > lo else -1.0
+        hi = min(len(d_s) - 1, m + 5)
+        post_slope = float(np.mean(grad[m:hi])) if hi > m else 1.0
+        ref_d = float(d_s[m]) if d_s[m] > 0 else 1.0
+        threshold = min_slope_ratio * ref_d
+        if pre_slope < -threshold and post_slope > threshold:
+            gated.append(m)
+    return gated
+
+
+def depth_gate(d_s: np.ndarray, minima: List[int],
+               ref_win: int = 40, min_ds_percent: float = 15.0) -> List[int]:
+    """
+    Keep only minima that represent a clinically meaningful diameter reduction.
+
+    The curvature/slope gate fails for gradual stenoses: a 50% stenosis that
+    develops over 20 centerline points has a per-step slope that is often below
+    the slope threshold, so it gets rejected even though the total drop is large.
+
+    This gate uses the clinical QCA definition directly:
+        DS% = (reference_diameter - MLD) / reference_diameter × 100
+    and keeps a minimum only when the DT-profile drop is >= min_ds_percent.
+    Any real stenosis — focal or diffuse, sharp or gradual — passes equally.
+    """
+    N = len(d_s)
+    gated = []
+    for m in minima:
+        left0 = max(0, m - ref_win)
+        right0 = min(N - 1, m + ref_win)
+        # Reference = healthy diameter adjacent to the dip (exclude the dip itself)
+        ref_pts = list(d_s[left0:m]) + list(d_s[m + 1:right0 + 1])
+        if len(ref_pts) < 3:
+            continue
+        local_ref = float(np.percentile(ref_pts, 80))
+        if local_ref <= 1e-6:
+            continue
+        ds_pct = (1.0 - float(d_s[m]) / local_ref) * 100.0
+        if ds_pct >= min_ds_percent:
+            gated.append(m)
+    return gated
+
+
+def calibrate_from_catheter(mask_catheter: np.ndarray,
+                             known_diameter_mm: float = 2.0) -> Optional[float]:
+    """
+    Estimate px_to_mm by measuring catheter shaft width across multiple
+    horizontal cross-sections. Returns mm/px or None if measurement fails.
+    A 6F guiding catheter has outer diameter ~2.0 mm.
+    """
+    ys, _ = np.where(mask_catheter > 0)
+    if len(ys) == 0:
+        return None
+    widths = []
+    for row in range(mask_catheter.shape[0]):
+        cols = np.where(mask_catheter[row] > 0)[0]
+        if len(cols) > 3:
+            widths.append(int(cols[-1]) - int(cols[0]) + 1)
+    if len(widths) < 5:
+        return None
+    median_w = float(np.median(widths))
+    return known_diameter_mm / median_w if median_w > 0 else None
+
+
+# =========================
+# QCA: diameter profile + lesion metrics (V6-enhanced)
+# =========================
+def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
+                              cfg: QCAConfig,
+                              mask: Optional[np.ndarray] = None,
+                              angio_gray: Optional[np.ndarray] = None) -> List[dict]:
+    """
+    Run lesion detection on a single branch centerline with V6 enhancements:
+      - Spline-smoothed centerline to reduce jagged artifacts
+      - Curvature-derivative gating to reject flat-profile false positives
+      - Orthogonal boundary diameter at lesion minima (more accurate than DT)
+      - Sub-pixel gradient edge refinement when angio_gray is provided
+      - Tapered RVD for accurate reference in tapering vessels
+      - Confidence score per lesion
+    """
+    # Spline-smooth the centerline — used for tangent direction only.
+    # The DT profile is always built from the original branch (skeleton pixels
+    # guaranteed to be inside the vessel mask), preventing artificial diameter
+    # dips where the spline drifts off-mask.
+    branch_s = smooth_centerline_spline(branch, smoothing=3.0)
+    N = len(branch)                        # both branch and branch_s have same length
+    branch_arr = np.array(branch_s)        # shape (N, 2) = (y, x), used for tangents
+
+    # DT profile on ORIGINAL branch points (always inside the mask).
+    # Adaptive smooth_win: cap at N//3 so short branches are not over-smoothed
+    # (e.g., a 15-pt branch with win=11 would destroy all spatial detail).
+    adapt_win = max(3, min(cfg.smooth_win, N // 3 if N >= 9 else 3))
+    if adapt_win % 2 == 0:
+        adapt_win += 1
+    d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
+    d_s = smooth_1d(d_raw, adapt_win)
+
+    # Depth gate: keep only minima that represent a meaningful diameter drop.
+    # This directly implements the QCA clinical definition of stenosis
+    # (DS% = (RVD - MLD)/RVD) and works for both focal and gradual stenoses,
+    # unlike slope-based gates which miss stenoses that narrow gradually.
+    minima_raw = local_minima_indices(d_s)
+    minima = depth_gate(d_s, minima_raw,
+                        ref_win=cfg.ref_win_prox, min_ds_percent=20.0)
+
     lesions = []
+
+    # Branch-level median diameter (from raw, unsmoothed DT).
+    # Used to exclude catheter / aortic segments from the reference pool.
+    # The catheter is far wider than any coronary vessel — its DT is typically
+    # 30–80 px while coronary vessels are 3–20 px. By capping reference
+    # candidates at 2× the branch median, we prevent the catheter from
+    # inflating the reference diameter and falsely creating a large DS%.
+    branch_median_dt = float(np.median(d_raw))
+    ref_cap = branch_median_dt * 2.0        # reference ceiling in smoothed-diameter space
 
     for m in minima:
         left0 = max(0, m - cfg.ref_win_prox)
         right0 = min(N - 1, m + cfg.ref_win_dist)
-        local_ref = np.median(d_s[left0:right0+1])
+        prox_avail = m - left0
+        dist_avail = right0 - m
+
+        # Reference diameter: healthy vessel on EITHER side of the lesion.
+        # Values above ref_cap are catheter / aortic territory and are excluded.
+        # Per clinical consensus, reference = adjacent healthy-segment diameter.
+        ref_candidates: List[float] = []
+        if prox_avail >= 3:
+            ref_candidates.extend([v for v in d_s[left0:m] if v <= ref_cap])
+        if dist_avail >= 3:
+            ref_candidates.extend([v for v in d_s[m + 1:right0 + 1] if v <= ref_cap])
+
+        if len(ref_candidates) >= 5:
+            local_ref = float(np.percentile(ref_candidates, 80))
+        elif len(ref_candidates) > 0:
+            local_ref = float(np.median(ref_candidates))
+        else:
+            # No adjacent reference at all → cannot establish a reliable baseline
+            continue
+
         if local_ref <= 1e-6:
             continue
 
         thr = cfg.lesion_alpha * local_ref
-
-        L = m
+        L, R = m, m
         while L > 0 and d_s[L] < thr:
             L -= 1
-        R = m
         while R < N - 1 and d_s[R] < thr:
             R += 1
 
         if (R - L + 1) < cfg.min_lesion_points:
             continue
 
-        prox_L = max(0, L - cfg.ref_win_prox)
-        prox_R = max(0, L - 1)
-        dist_L = min(N - 1, R + 1)
-        dist_R = min(N - 1, R + cfg.ref_win_dist)
-
-        if prox_R - prox_L + 1 < 5 or dist_R - dist_L + 1 < 5:
+        # Skip minima within 5 pts of branch endpoints — these are junction/endpoint
+        # pixels where the vessel geometry changes abruptly and measurements are
+        # unreliable (skeleton degree transitions, natural tapering at tips).
+        edge_margin = max(5, cfg.min_lesion_points)
+        if m < edge_margin or m > N - 1 - edge_margin:
             continue
 
-        RVD_prox = float(np.percentile(d_s[prox_L:prox_R+1], 80))
-        RVD_dist = float(np.percentile(d_s[dist_L:dist_R+1], 80))
-        RVD = 0.5 * (RVD_prox + RVD_dist)
-        if RVD <= 1e-6:
-            continue
+        # DT-based diameter at this exact original-branch point (no smoothing).
+        # Used as a ground-truth sanity check for the orthogonal measurement.
+        orig_y, orig_x = branch[m]
+        dt_at_orig = float(dt[orig_y, orig_x])
+        dt_mld_raw  = 2.0 * dt_at_orig   # DT diameter in pixels at the minimum
 
-        MLD = float(np.min(d_s[L:R+1]))
-        percent_DS = (1.0 - (MLD / RVD)) * 100.0
+        # MLD: orthogonal rays then optional sub-pixel refinement.
+        if mask is not None:
+            mld_orth = orthogonal_diameter(mask, branch_arr, m)
 
-        length_px = arc_length(branch, L, R)
+            # Sub-pixel refinement — only accept if the result stays within ±50% of
+            # the orthogonal estimate.  Large deviations indicate edge-detection
+            # failures at overlapping vessels or high-curvature sections.
+            if angio_gray is not None:
+                refined = refine_diameter_subpixel(angio_gray, mask, branch_arr, m, mld_orth)
+                if mld_orth > 0 and 0.5 <= refined / mld_orth <= 1.5:
+                    mld_orth = refined
 
-        if cfg.px_to_mm is not None:
-            MLD_mm = MLD * cfg.px_to_mm
-            RVD_mm = RVD * cfg.px_to_mm
-            length_mm = length_px * cfg.px_to_mm
+            # Cross-validate orthogonal against DT.  At tight curves and junction
+            # points the spline tangent is wrong, causing the orthogonal ray to exit
+            # the vessel on the inner wall too early.  The DT gives the true minimum
+            # distance to the vessel wall regardless of direction.
+            # If orthogonal is < 65% of the DT diameter, it exited the wrong wall.
+            if dt_mld_raw > 2.0 and mld_orth < dt_mld_raw * 0.65:
+                MLD    = float(d_s[m])   # fall back to smoothed DT estimate
+                method = "dt"
+            else:
+                MLD    = float(mld_orth)
+                method = "orthogonal"
         else:
-            MLD_mm = None
-            RVD_mm = None
-            length_mm = None
+            MLD    = float(d_s[m])
+            method = "dt"
+
+        # Total occlusion: only when DT at the original skeleton point confirms
+        # essentially zero vessel width (< 0.5 px from wall).
+        is_total_occlusion = (dt_at_orig < cfg.total_occlusion_px_threshold)
+
+        if is_total_occlusion:
+            MLD = 0.0
+            percent_DS = 100.0
+            RVD = local_ref          # use adjacent healthy diameter, not global ref
+        else:
+            RVD = _tapered_rvd(d_s, L, R, m, cfg.ref_win_prox, cfg.ref_win_dist)
+            if RVD <= 1e-6:
+                RVD = local_ref      # fallback to the reference window we already computed
+            percent_DS = max(0.0, (1.0 - MLD / RVD) * 100.0)
+
+        length_px = arc_length(branch, L, R)  # use original branch for geometry
+        px = cfg.px_to_mm
+        MLD_mm = MLD * px if px else None
+        RVD_mm = RVD * px if px else None
+        length_mm = length_px * px if px else None
 
         severity = "MILD"
         if percent_DS >= cfg.severe_threshold:
@@ -441,23 +767,36 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray, cfg: 
         elif percent_DS >= cfg.moderate_threshold:
             severity = "MODERATE"
 
+        # Confidence score: edge sharpness (0.5) + ref quality (0.3) + length (0.2)
+        edge_sharpness = min(1.0, (local_ref - MLD) / (local_ref + 1e-6))
+        ref_quality = 1.0 if (prox_avail >= 20 and dist_avail >= 20) else 0.5
+        len_score = min(1.0, (R - L + 1) / 20.0)
+        confidence = round(edge_sharpness * 0.5 + ref_quality * 0.3 + len_score * 0.2, 3)
+
         lesions.append({
-            "L_idx": int(L),
-            "R_idx": int(R),
-            "min_idx": int(m),
-            "MLD_px": MLD,
-            "RVD_px": RVD,
-            "DS_percent": percent_DS,
-            "length_px": length_px,
-            "MLD_mm": MLD_mm,
-            "RVD_mm": RVD_mm,
-            "length_mm": length_mm,
-            "severity": severity,
-            "min_pt": branch[m],          # (y,x) of narrowest point
-            "branch": branch,             # reference to the branch path
+            "L_idx":           int(L),
+            "R_idx":           int(R),
+            "min_idx":         int(m),
+            "MLD_px":          MLD,
+            "RVD_px":          RVD,
+            "DS_percent":      percent_DS,
+            "length_px":       length_px,
+            "MLD_mm":          MLD_mm,
+            "RVD_mm":          RVD_mm,
+            "length_mm":       length_mm,
+            "severity":        severity,
+            "total_occlusion": is_total_occlusion,
+            "min_pt":          branch[m],   # original branch pixel — always inside mask
+            "branch":          branch,
+            "branch_smooth":   branch_s,
+            "confidence":      confidence,
+            "method":          method,
+            "edge_sharpness":  round(float(edge_sharpness), 3),
+            "ref_quality":     round(float(ref_quality), 3),
+            "len_score":       round(float(len_score), 3),
         })
 
-    # merge overlapping on this branch
+    # Merge overlapping lesions on this branch
     lesions = sorted(lesions, key=lambda z: (z["L_idx"], z["R_idx"]))
     merged = []
     for les in lesions:
@@ -477,44 +816,39 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray, cfg: 
     return merged
 
 
-def qca_from_mask(bw_mask: np.ndarray, cfg: QCAConfig):
+def qca_from_mask(bw_mask: np.ndarray, cfg: QCAConfig,
+                  angio_gray: Optional[np.ndarray] = None):
     """
-    Multi-branch QCA: skeletonize, decompose into branches,
-    detect lesions on each branch independently.
-    Optimized: Crops the mask to the bounding box of the vessel before expensive 
-    skeletonization and distance_transform operations.
-    Returns:
-      all_branches, all_lesions (sorted by severity), dt
+    Multi-branch QCA with V6 enhancements: skeletonize, decompose into branches,
+    detect lesions on each branch with orthogonal + sub-pixel refinement.
+    Optimized: Crops the mask to bounding box before expensive operations.
+    Returns: all_branches, all_lesions (sorted by severity), dt
     """
-    # 1. Find bounding box of the mask to crop it
     ys, xs = np.where(bw_mask > 0)
     if len(ys) == 0:
         return [], [], np.zeros_like(bw_mask, dtype=np.float32)
-        
+
     y_min, y_max = np.min(ys), np.max(ys)
     x_min, x_max = np.min(xs), np.max(xs)
-    
+
     pad = 10
     H, W = bw_mask.shape
     y1, y2 = max(0, y_min - pad), min(H, y_max + pad + 1)
     x1, x2 = max(0, x_min - pad), min(W, x_max + pad + 1)
-    
-    # Process only cropped region
+
     cropped_mask = bw_mask[y1:y2, x1:x2]
-    
+
     cr_skel = get_skeleton_from_mask(cropped_mask, cfg)
     cr_dt = distance_transform_edt(cropped_mask > 0)
-    
-    # Restore full sizes
+
     skel = np.zeros_like(bw_mask)
     skel[y1:y2, x1:x2] = cr_skel
-    
+
     dt = np.zeros_like(bw_mask, dtype=np.float32)
     dt[y1:y2, x1:x2] = cr_dt
 
     branches = extract_all_branches(skel, cfg.min_branch_len)
 
-    # Fallback: if branch decomposition yields nothing, use longest-path
     if not branches:
         try:
             cl = ordered_centerline_from_mask(bw_mask, cfg)
@@ -524,7 +858,9 @@ def qca_from_mask(bw_mask: np.ndarray, cfg: QCAConfig):
 
     all_lesions = []
     for branch in branches:
-        lesions = detect_lesions_on_branch(branch, dt, cfg)
+        lesions = detect_lesions_on_branch(branch, dt, cfg,
+                                           mask=bw_mask,
+                                           angio_gray=angio_gray)
         all_lesions.extend(lesions)
 
     all_lesions = sorted(all_lesions, key=lambda z: z["DS_percent"], reverse=True)
@@ -543,6 +879,17 @@ _BRANCH_COLORS = [
     (100, 200, 255), # orange
 ]
 
+_SEVERITY_BGR = {
+    "SEVERE":   (0,  0,  255),   # Red
+    "MODERATE": (0, 140, 255),   # Orange
+    "MILD":     (0, 215, 255),   # Gold
+}
+_SEVERITY_RADIUS = {
+    "SEVERE":   3,
+    "MODERATE": 2,
+    "MILD":     1,
+}
+
 def draw_overlay(angio: np.ndarray, mask: np.ndarray, branches: List[List[Tuple[int,int]]],
                  lesions: List[dict]) -> np.ndarray:
     if angio.ndim == 2:
@@ -560,17 +907,32 @@ def draw_overlay(angio: np.ndarray, mask: np.ndarray, branches: List[List[Tuple[
         for (y, x) in branch:
             vis[y, x] = color
 
-    # lesions: mark segment in red and label
-    for k, les in enumerate(lesions[:5]):  # show top 5
+    # Only MODERATE (≥50% DS) and SEVERE (≥70% DS) lesions are drawn.
+    # Mild (<50%) lesions are still detected and written to the CSV but are
+    # not shown on the overlay to keep the image clinically actionable.
+    # Color coding:
+    #   SEVERE   (≥70%)  = Red    (circles r=3, prominent label)
+    #   MODERATE (50-69%)= Orange (circles r=2)
+    display_lesions = [l for l in lesions
+                       if l.get("severity", "MILD") in ("SEVERE", "MODERATE")]
+    for k, les in enumerate(display_lesions):
+        sev = les.get("severity", "MILD")
+        color  = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
+        radius = _SEVERITY_RADIUS.get(sev, 1)
         branch = les["branch"]
         L, R = les["L_idx"], les["R_idx"]
         for i in range(L, min(R + 1, len(branch))):
             y, x = branch[i]
-            cv2.circle(vis, (x, y), 2, (0, 0, 255), -1)
-        # label at narrowest point
+            cv2.circle(vis, (x, y), radius, color, -1)
+
         y0, x0 = les["min_pt"]
-        text = f"#{k+1} {les['DS_percent']:.1f}% {les['severity']}"
-        cv2.putText(vis, text, (x0 + 8, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
+        occ    = " [OCC]" if les.get("total_occlusion") else ""
+        ds_str = f"{les['DS_percent']:.1f}%"
+        label  = f"#{k+1} {ds_str} {sev[:3]}{occ}"
+        font_scale = 0.45 if sev == "SEVERE" else 0.38
+        thickness  = 1
+        cv2.putText(vis, label, (x0 + 6, y0 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
 
     return vis
 
@@ -602,99 +964,108 @@ def save_diameter_plot(out_path: Path, branches: List[List[Tuple[int,int]]],
     plt.savefig(out_path, dpi=150)
     plt.close()
 
-def save_explainable_report(out_dir: Path, stem: str, angio: np.ndarray, mask: np.ndarray,
-                            branches: List[List[Tuple[int,int]]], lesions: List[dict],
-                            dt: np.ndarray, cfg: QCAConfig, top_k: int = 3):
+def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
+                        les: dict, cfg: QCAConfig, title: str,
+                        heatmap: Optional[np.ndarray] = None) -> "plt.Figure":
     """
-    Generates a detailed, multi-panel PDF/PNG report for the top K severe lesions.
-    Shows cropped angiogram, heatmap overlay, and localized diameter profile.
-    """
-    if not lesions:
-        return
+    Builds the 3-panel explainable figure (cropped angiogram, width heatmap,
+    localized diameter profile) for a single lesion. Returns an open
+    matplotlib Figure — caller is responsible for saving/embedding and closing it.
 
-    # Create JET colormap of distance transform for thickness heatmap
-    dt_norm = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    heatmap = cv2.applyColorMap(dt_norm, cv2.COLORMAP_JET)
-    
-    # ensure angio is BGR for overlaying
+    `heatmap` may be passed in precomputed (BGR colormap of the full-frame
+    distance transform) to avoid recomputing it per lesion when called in a loop
+    over several lesions from the same frame; otherwise it's derived from `dt`.
+    """
+    if heatmap is None:
+        dt_norm = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        heatmap = cv2.applyColorMap(dt_norm, cv2.COLORMAP_JET)
+
     if angio.ndim == 2:
         angio_bgr = cv2.cvtColor(angio, cv2.COLOR_GRAY2BGR)
     else:
         angio_bgr = angio.copy()
 
+    branch = les["branch"]
+    L, R = les["L_idx"], les["R_idx"]
+    m_idx = les["min_idx"]
+
+    y0, x0 = les["min_pt"]
+    crop_size = 80
+    H, W = angio.shape[:2]
+
+    y1, y2 = max(0, y0 - crop_size), min(H, y0 + crop_size)
+    x1, x2 = max(0, x0 - crop_size), min(W, x0 + crop_size)
+
+    patch_angio = angio_bgr[y1:y2, x1:x2].copy()
+    patch_heat = heatmap[y1:y2, x1:x2].copy()
+    patch_mask = mask[y1:y2, x1:x2]
+
+    patch_heat[patch_mask == 0] = patch_angio[patch_mask == 0]
+    patch_blended = cv2.addWeighted(patch_angio, 0.4, patch_heat, 0.6, 0)
+
+    for (py, px) in branch[L:R+1]:
+        if y1 <= py < y2 and x1 <= px < x2:
+            cv2.circle(patch_angio, (px - x1, py - y1), 1, (0, 0, 255), -1)
+            cv2.circle(patch_blended, (px - x1, py - y1), 1, (255, 255, 255), -1)
+
+    pad = 60
+    disp_L = max(0, L - pad)
+    disp_R = min(len(branch) - 1, R + pad)
+
+    d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
+    d_s = smooth_1d(d_raw, cfg.smooth_win)
+
+    fig = plt.figure(figsize=(14, 5))
+
+    ax1 = plt.subplot(1, 3, 1)
+    ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
+    ax1.set_title("Lesion Angiogram")
+    ax1.axis('off')
+
+    ax2 = plt.subplot(1, 3, 2)
+    ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
+    ax2.set_title("Width Heatmap (Red=Wide, Blue=Narrow)")
+    ax2.axis('off')
+
+    ax3 = plt.subplot(1, 3, 3)
+    region_raw = d_raw[disp_L:disp_R+1]
+    region_smooth = d_s[disp_L:disp_R+1]
+    x_axis = range(disp_L, disp_R+1)
+
+    ax3.plot(x_axis, region_raw, alpha=0.4, color='gray', label="Raw DT Width")
+    ax3.plot(x_axis, region_smooth, color='blue', label="Smoothed Width")
+    ax3.axvspan(L, R, alpha=0.2, color="red", label="Stenosis Region")
+    ax3.axhline(les["RVD_px"], color='green', linestyle='--', label=f"RVD: {les['RVD_px']:.1f}px")
+    ax3.plot(m_idx, les["MLD_px"], 'rv', markersize=8, label=f"MLD: {les['MLD_px']:.1f}px")
+    ax3.set_title("Local Diameter Profile")
+    ax3.set_ylabel("Diameter (pixels)")
+    ax3.legend(fontsize=9)
+
+    occ_str = " [TOTAL OCCLUSION]" if les.get("total_occlusion") else ""
+    conf_str = f"  conf={les.get('confidence', '?')}  method={les.get('method', '?')}"
+    fig.suptitle(
+        f"{title} | {les['DS_percent']:.1f}% DS ({les['severity']}){occ_str}{conf_str}",
+        fontsize=14, fontweight='bold'
+    )
+    plt.tight_layout()
+    return fig
+
+
+def save_explainable_report(out_dir: Path, stem: str, angio: np.ndarray, mask: np.ndarray,
+                            branches: List[List[Tuple[int,int]]], lesions: List[dict],
+                            dt: np.ndarray, cfg: QCAConfig, top_k: int = 3):
+    """
+    Generates a detailed, multi-panel PNG report for the top K severe lesions.
+    Shows cropped angiogram, heatmap overlay, and localized diameter profile.
+    """
+    if not lesions:
+        return
+
+    dt_norm = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    heatmap = cv2.applyColorMap(dt_norm, cv2.COLORMAP_JET)
+
     for k, les in enumerate(lesions[:top_k], start=1):
-        branch = les["branch"]
-        L, R = les["L_idx"], les["R_idx"]
-        m_idx = les["min_idx"]
-        
-        # Crop region around the lesion
-        y0, x0 = les["min_pt"]
-        crop_size = 80
-        H, W = angio.shape[:2]
-        
-        y1, y2 = max(0, y0 - crop_size), min(H, y0 + crop_size)
-        x1, x2 = max(0, x0 - crop_size), min(W, x0 + crop_size)
-        
-        patch_angio = angio_bgr[y1:y2, x1:x2].copy()
-        patch_heat = heatmap[y1:y2, x1:x2].copy()
-        patch_mask = mask[y1:y2, x1:x2]
-        
-        # Apply mask to heatmap so it only colors the vessel, not background
-        patch_heat[patch_mask == 0] = patch_angio[patch_mask == 0]
-        
-        # Blend heatmap with original angiogram
-        patch_blended = cv2.addWeighted(patch_angio, 0.4, patch_heat, 0.6, 0)
-        
-        # Draw lesion markers on patches
-        for (py, px) in branch[L:R+1]:
-            if y1 <= py < y2 and x1 <= px < x2:
-                cv2.circle(patch_angio, (px - x1, py - y1), 1, (0, 0, 255), -1)
-                cv2.circle(patch_blended, (px - x1, py - y1), 1, (255, 255, 255), -1)
-        
-        # Centerline profile data for THIS lesion specifically (+ pad)
-        pad = 60
-        disp_L = max(0, L - pad)
-        disp_R = min(len(branch) - 1, R + pad)
-        
-        d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
-        d_s = smooth_1d(d_raw, cfg.smooth_win)
-        
-        fig = plt.figure(figsize=(14, 5))
-        
-        # Panel 1: Original Patched Angiogram
-        ax1 = plt.subplot(1, 3, 1)
-        ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
-        ax1.set_title(f"Lesion #{k} Angiogram")
-        ax1.axis('off')
-        
-        # Panel 2: Heatmap Overlay
-        ax2 = plt.subplot(1, 3, 2)
-        ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
-        ax2.set_title(f"Width Heatmap (Red=Wide, Blue=Narrow)")
-        ax2.axis('off')
-        
-        # Panel 3: Diameter Profile
-        ax3 = plt.subplot(1, 3, 3)
-        region_raw = d_raw[disp_L:disp_R+1]
-        region_smooth = d_s[disp_L:disp_R+1]
-        x_axis = range(disp_L, disp_R+1)
-        
-        ax3.plot(x_axis, region_raw, alpha=0.4, color='gray', label="Raw DT Width")
-        ax3.plot(x_axis, region_smooth, color='blue', label="Smoothed Width")
-        
-        # Highlight MLD and RVD lines
-        ax3.axvspan(L, R, alpha=0.2, color="red", label="Stenosis Region")
-        ax3.axhline(les["RVD_px"], color='green', linestyle='--', label=f"Ref Vess Dia (RVD): {les['RVD_px']:.1f}px")
-        ax3.plot(m_idx, les["MLD_px"], 'rv', markersize=8, label=f"Min Lumen Dia (MLD): {les['MLD_px']:.1f}px")
-        
-        ax3.set_title("Local Diameter Profile")
-        ax3.set_ylabel("Diameter (pixels)")
-        ax3.legend(fontsize=9)
-        
-        # Add overarching title with metrics
-        fig.suptitle(f"{stem} - Lesion #{k} Report | {les['DS_percent']:.1f}% DS ({les['severity']})", fontsize=16, fontweight='bold')
-        
-        plt.tight_layout()
+        fig = build_lesion_figure(angio, mask, dt, les, cfg, f"{stem} - Lesion #{k}", heatmap=heatmap)
         report_path = out_dir / f"{stem}_lesion_{k}_report.png"
         plt.savefig(report_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
@@ -703,6 +1074,14 @@ def save_explainable_report(out_dir: Path, stem: str, angio: np.ndarray, mask: n
 # =========================
 # Batch runner
 # =========================
+_CSV_FIELDS_BATCH = [
+    "file", "lesion_rank", "severity", "DS_percent",
+    "MLD_px", "RVD_px", "length_px",
+    "MLD_mm", "RVD_mm", "length_mm",
+    "L_idx", "R_idx", "min_idx",
+    "total_occlusion", "confidence", "method",
+]
+
 def run_qca_batch(angiogram_dir: str, mask_dir: str, out_dir: str,
                   cfg: QCAConfig,
                   angio_exts=(".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")):
@@ -711,7 +1090,6 @@ def run_qca_batch(angiogram_dir: str, mask_dir: str, out_dir: str,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # match by stem name
     angio_files = []
     for ext in angio_exts:
         angio_files += list(angio_dir.glob(f"*{ext}"))
@@ -721,20 +1099,11 @@ def run_qca_batch(angiogram_dir: str, mask_dir: str, out_dir: str,
 
     report_csv = out / "qca_report.csv"
     with open(report_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "file",
-            "lesion_rank",
-            "severity",
-            "DS_percent",
-            "MLD_px", "RVD_px", "length_px",
-            "MLD_mm", "RVD_mm", "length_mm",
-            "L_idx", "R_idx", "min_idx"
-        ])
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS_BATCH)
         writer.writeheader()
 
         for img_path in sorted(angio_files):
             stem = img_path.stem
-            # find corresponding mask
             mask_path = None
             for ext in angio_exts:
                 cand = mask_dirp / f"{stem}{ext}"
@@ -742,7 +1111,6 @@ def run_qca_batch(angiogram_dir: str, mask_dir: str, out_dir: str,
                     mask_path = cand
                     break
             if mask_path is None:
-                # also try _mask naming
                 for ext in angio_exts:
                     cand = mask_dirp / f"{stem}_mask{ext}"
                     if cand.exists():
@@ -763,47 +1131,52 @@ def run_qca_batch(angiogram_dir: str, mask_dir: str, out_dir: str,
             bw = morph_cleanup(bw, cfg)
 
             try:
-                branches, lesions, dt = qca_from_mask(bw, cfg)
+                branches, lesions, dt = qca_from_mask(bw, cfg, angio_gray=angio)
             except Exception as e:
                 print(f"[FAIL] {img_path.name}: {e}")
                 continue
 
-            # save overlay, plot, and explainable report
             overlay = draw_overlay(angio, bw, branches, lesions)
             cv2.imwrite(str(out / f"{stem}_overlay.png"), overlay)
             save_diameter_plot(out / f"{stem}_diameter.png", branches, dt, lesions, cfg)
             save_explainable_report(out, stem, angio, bw, branches, lesions, dt, cfg)
 
-            # write CSV rows (top K lesions)
             for rank, les in enumerate(lesions[:5], start=1):
                 writer.writerow({
-                    "file": img_path.name,
-                    "lesion_rank": rank,
-                    "severity": les["severity"],
-                    "DS_percent": f"{les['DS_percent']:.4f}",
-                    "MLD_px": f"{les['MLD_px']:.4f}",
-                    "RVD_px": f"{les['RVD_px']:.4f}",
-                    "length_px": f"{les['length_px']:.4f}",
-                    "MLD_mm": "" if les["MLD_mm"] is None else f"{les['MLD_mm']:.4f}",
-                    "RVD_mm": "" if les["RVD_mm"] is None else f"{les['RVD_mm']:.4f}",
-                    "length_mm": "" if les["length_mm"] is None else f"{les['length_mm']:.4f}",
-                    "L_idx": les["L_idx"],
-                    "R_idx": les["R_idx"],
-                    "min_idx": les["min_idx"],
+                    "file":            img_path.name,
+                    "lesion_rank":     rank,
+                    "severity":        les["severity"],
+                    "DS_percent":      f"{les['DS_percent']:.4f}",
+                    "MLD_px":          f"{les['MLD_px']:.4f}",
+                    "RVD_px":          f"{les['RVD_px']:.4f}",
+                    "length_px":       f"{les['length_px']:.4f}",
+                    "MLD_mm":          "" if les["MLD_mm"] is None else f"{les['MLD_mm']:.4f}",
+                    "RVD_mm":          "" if les["RVD_mm"] is None else f"{les['RVD_mm']:.4f}",
+                    "length_mm":       "" if les["length_mm"] is None else f"{les['length_mm']:.4f}",
+                    "L_idx":           les["L_idx"],
+                    "R_idx":           les["R_idx"],
+                    "min_idx":         les["min_idx"],
+                    "total_occlusion": les.get("total_occlusion", False),
+                    "confidence":      les.get("confidence", ""),
+                    "method":          les.get("method", "dt"),
                 })
 
-            print(f"[OK] {img_path.name}: lesions={len(lesions)}")
+            print(f"[OK] {img_path.name}: lesions={len(lesions)}, branches={len(branches)}")
 
     print(f"\nSaved report: {report_csv}")
     print(f"Saved outputs to: {out}")
 
 
 # =========================
-# Example usage
-# =========================
-# =========================
 # Single image runner
 # =========================
+_CSV_FIELDS_SINGLE = [
+    "file", "lesion_rank", "branch_id", "severity", "DS_percent",
+    "MLD_px", "RVD_px", "length_px",
+    "MLD_mm", "RVD_mm", "length_mm",
+    "total_occlusion", "confidence", "method",
+]
+
 def run_qca_single(angio_path: str, mask_path: str, out_dir: str, cfg: QCAConfig):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -813,7 +1186,7 @@ def run_qca_single(angio_path: str, mask_path: str, out_dir: str, cfg: QCAConfig
 
     angio = cv2.imread(angio_path, cv2.IMREAD_GRAYSCALE)
     mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    
+
     if angio is None or mask_img is None:
         print(f"[FAIL] Failed to read image or mask.")
         return
@@ -822,17 +1195,23 @@ def run_qca_single(angio_path: str, mask_path: str, out_dir: str, cfg: QCAConfig
     bw = morph_cleanup(bw, cfg)
 
     try:
-        branches, lesions, dt = qca_from_mask(bw, cfg)
+        branches, lesions, dt = qca_from_mask(bw, cfg, angio_gray=angio)
     except Exception as e:
         print(f"[FAIL] {img_path.name}: {e}")
         return
 
-    print(f"  Branches found: {len(branches)}")
+    print(f"  Branches found : {len(branches)}")
     print(f"  Lesions detected: {len(lesions)}")
     for i, les in enumerate(lesions):
-        print(f"    #{i+1}: DS={les['DS_percent']:.1f}% ({les['severity']})  MLD={les['MLD_px']:.1f}px  RVD={les['RVD_px']:.1f}px")
+        occ = " [TOTAL OCCLUSION]" if les.get("total_occlusion") else ""
+        mld_str = (f"MLD={les['MLD_mm']:.2f}mm" if les["MLD_mm"] is not None
+                   else f"MLD={les['MLD_px']:.1f}px")
+        rvd_str = (f"RVD={les['RVD_mm']:.2f}mm" if les["RVD_mm"] is not None
+                   else f"RVD={les['RVD_px']:.1f}px")
+        print(f"    #{i+1}: DS={les['DS_percent']:.1f}% ({les['severity']}){occ}  "
+              f"{mld_str}  {rvd_str}  "
+              f"conf={les.get('confidence','?')}  method={les.get('method','?')}")
 
-    # save overlay, plot, and explainable reports
     overlay = draw_overlay(angio, bw, branches, lesions)
     cv2.imwrite(str(out / f"{stem}_overlay.png"), overlay)
     save_diameter_plot(out / f"{stem}_diameter.png", branches, dt, lesions, cfg)
@@ -840,72 +1219,66 @@ def run_qca_single(angio_path: str, mask_path: str, out_dir: str, cfg: QCAConfig
 
     report_csv = out / f"{stem}_qca_report.csv"
     with open(report_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "file",
-            "lesion_rank",
-            "branch_id",
-            "severity",
-            "DS_percent",
-            "MLD_px", "RVD_px", "length_px",
-            "MLD_mm", "RVD_mm", "length_mm",
-        ])
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS_SINGLE)
         writer.writeheader()
 
         for rank, les in enumerate(lesions[:10], start=1):
-            # find which branch index
             b_id = -1
             for bi, br in enumerate(branches):
                 if les["branch"] is br:
                     b_id = bi + 1
                     break
             writer.writerow({
-                "file": img_path.name,
-                "lesion_rank": rank,
-                "branch_id": b_id,
-                "severity": les["severity"],
-                "DS_percent": f"{les['DS_percent']:.4f}",
-                "MLD_px": f"{les['MLD_px']:.4f}",
-                "RVD_px": f"{les['RVD_px']:.4f}",
-                "length_px": f"{les['length_px']:.4f}",
-                "MLD_mm": "" if les["MLD_mm"] is None else f"{les['MLD_mm']:.4f}",
-                "RVD_mm": "" if les["RVD_mm"] is None else f"{les['RVD_mm']:.4f}",
-                "length_mm": "" if les["length_mm"] is None else f"{les['length_mm']:.4f}",
+                "file":            img_path.name,
+                "lesion_rank":     rank,
+                "branch_id":       b_id,
+                "severity":        les["severity"],
+                "DS_percent":      f"{les['DS_percent']:.4f}",
+                "MLD_px":          f"{les['MLD_px']:.4f}",
+                "RVD_px":          f"{les['RVD_px']:.4f}",
+                "length_px":       f"{les['length_px']:.4f}",
+                "MLD_mm":          "" if les["MLD_mm"] is None else f"{les['MLD_mm']:.4f}",
+                "RVD_mm":          "" if les["RVD_mm"] is None else f"{les['RVD_mm']:.4f}",
+                "length_mm":       "" if les["length_mm"] is None else f"{les['length_mm']:.4f}",
+                "total_occlusion": les.get("total_occlusion", False),
+                "confidence":      les.get("confidence", ""),
+                "method":          les.get("method", "dt"),
             })
 
     print(f"[OK] {img_path.name}: {len(lesions)} lesions across {len(branches)} branches")
-    print(f"\nSaved report: {report_csv}")
+    print(f"\nSaved report : {report_csv}")
     print(f"Saved outputs to: {out}")
 
 
 if __name__ == "__main__":
     import tkinter as tk
     from tkinter import filedialog
-    
+
     cfg = QCAConfig(
-        # px_to_mm=0.05,   # <- set this if you know calibration (mm per pixel)
-        severe_threshold=50.0
+        # px_to_mm=0.20,   # set if you know calibration (mm per pixel); use calibrate_from_catheter()
+        # Thresholds follow ACC/AHA/ESC standard — do not override without clinical justification
     )
 
     root = tk.Tk()
     root.attributes("-topmost", True)
-    root.withdraw() # Hide the main window
+    root.withdraw()
 
     print("Please select the angiogram image...")
     angio_file = filedialog.askopenfilename(
-        title="Select Angiogram Image", 
+        title="Select Angiogram Image",
         filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("All files", "*.*")]
     )
-    
+
     if not angio_file:
         print("No angiogram image selected. Exiting.")
         exit()
 
     print("Please select the corresponding mask image...")
     mask_file = filedialog.askopenfilename(
-        title="Select Mask Image", 
+        title="Select Mask Image",
         filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("All files", "*.*")]
     )
-    
+
     if not mask_file:
         print("No mask image selected. Exiting.")
         exit()

@@ -27,7 +27,8 @@ except ImportError:
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QSlider, QComboBox, QFileDialog, QHBoxLayout, QVBoxLayout,
-    QGroupBox, QStatusBar, QSizePolicy, QFrame, QLineEdit, QGridLayout
+    QGroupBox, QStatusBar, QSizePolicy, QFrame, QLineEdit, QGridLayout,
+    QListWidget, QListWidgetItem, QInputDialog, QMessageBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPalette, QIcon
@@ -40,10 +41,13 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from qca import (
-    QCAConfig, to_binary_mask, morph_cleanup, qca_from_mask, draw_overlay
+from qca import QCAConfig, draw_overlay
+from frame_pipeline import (
+    SegmentationModel, LocalizationModel,
+    preprocess_frame, segment_frame, run_localization_frame, run_qca_frame,
 )
-from localization import anatomy_logits_to_map_and_confidence, localize_lesions
+from report_engine import analyze_angle_video
+from pdf_report import render_clinical_report
 
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.onnx"),
@@ -65,12 +69,6 @@ def first_existing_path(paths):
 
 
 DEFAULT_MODEL_PATH = first_existing_path(DEFAULT_SEGMENTATION_MODEL_PATHS)
-
-
-def create_ort_session(model_path):
-    options = ort.SessionOptions()
-    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    return ort.InferenceSession(model_path, sess_options=options)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,18 +95,9 @@ class VideoThread(QThread):
         self.overlay_alpha = 0.4
         self.overlay_color = [255, 0, 0]  # Red (RGB)
 
-        # Segmentation model handles
-        self._ort_session = None
-        self._ort_input_name = None
-        self._torch_model = None
-        self._is_onnx = False
-
-        # Localization model handles
-        self._loc_ort_session = None
-        self._loc_ort_input_name = None
-        self._loc_output_names = None
-        self._loc_torch_model = None
-        self._loc_is_onnx = False
+        # Model handles (frame_pipeline.SegmentationModel / LocalizationModel)
+        self._seg_model = None
+        self._loc_model = None
         self._loc_class_map = None
         self._loc_confidence_map = None
         self._loc_frame_interval = 15
@@ -118,159 +107,46 @@ class VideoThread(QThread):
         self._qca_cfg = QCAConfig(severe_threshold=70.0)
 
     def load_model(self, model_path):
-        """Load model (ONNX or PyTorch) before starting the thread."""
+        """Load the segmentation model (ONNX or PyTorch) before starting the thread."""
         self.model_path = model_path
-        self._is_onnx = model_path.lower().endswith('.onnx')
-        self._ort_input_name = None
-
-        if self._is_onnx:
-            if not HAS_ONNX:
-                self.error.emit("onnxruntime not installed. Run: pip install onnxruntime")
-                return False
-            try:
-                self._ort_session = create_ort_session(model_path)
-                self._ort_input_name = self._ort_session.get_inputs()[0].name
-                return True
-            except Exception as e:
-                self.error.emit(f"ONNX load error: {e}")
-                return False
-        else:
-            try:
-                import torch
-
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from model_lightweight import MobileUNetv3, MobileUNetv2, MobileUNet, DSCUNet, DeepLabV3Plus
-
-                name = os.path.basename(model_path).lower()
-                if 'mobileunetv3' in name:
-                    model = MobileUNetv3(n_classes=1, pretrained=False)
-                elif 'mobileunetv2' in name:
-                    model = MobileUNetv2(n_classes=1, pretrained=False)
-                elif 'mobileunet' in name:
-                    model = MobileUNet(n_classes=1, pretrained=False)
-                elif 'deeplab' in name:
-                    model = DeepLabV3Plus(n_classes=1, pretrained=False)
-                elif 'dscunet' in name:
-                    model = DSCUNet(n_channels=3, n_classes=1)
-                else:
-                    model = MobileUNetv3(n_classes=1, pretrained=False)
-
-                device = torch.device('cpu')
-                model.load_state_dict(torch.load(model_path, map_location=device))
-                model.eval()
-                self._torch_model = model
-                return True
-            except ImportError:
-                self.error.emit("PyTorch not installed. Use .onnx models instead.")
-                return False
-            except Exception as e:
-                self.error.emit(f"PyTorch load error: {e}")
-                return False
+        try:
+            self._seg_model = SegmentationModel(model_path)
+            return True
+        except Exception as e:
+            self.error.emit(f"Model load error: {e}")
+            return False
 
     def load_localization_model(self, model_path):
         """Load optional multitask localization model (ONNX or PyTorch)."""
         self.localization_model_path = model_path
-        self._loc_ort_session = None
-        self._loc_ort_input_name = None
-        self._loc_output_names = None
-        self._loc_torch_model = None
+        self._loc_model = None
         self._loc_class_map = None
         self._loc_confidence_map = None
         self._frame_index = 0
 
         if not model_path:
             return True
-        if not os.path.exists(model_path):
-            self.error.emit(f"Localization model not found: {model_path}")
-            return False
-
-        self._loc_is_onnx = model_path.lower().endswith('.onnx')
-        if self._loc_is_onnx:
-            if not HAS_ONNX:
-                self.error.emit("onnxruntime not installed. Run: pip install onnxruntime")
-                return False
-            try:
-                self._loc_ort_session = create_ort_session(model_path)
-                self._loc_ort_input_name = self._loc_ort_session.get_inputs()[0].name
-                self._loc_output_names = [o.name.lower() for o in self._loc_ort_session.get_outputs()]
-                return True
-            except Exception as e:
-                self.error.emit(f"Localization ONNX load error: {e}")
-                return False
 
         try:
-            import torch
-            from model_multitask import MultiTaskMobileUNetv3
-
-            device = torch.device('cpu')
-            model = MultiTaskMobileUNetv3(pretrained=False)
-            model.load_state_dict(torch.load(model_path, map_location=device))
-            model.eval()
-            self._loc_torch_model = model
+            self._loc_model = LocalizationModel(model_path)
             return True
-        except ImportError:
-            self.error.emit("PyTorch not installed. Use .onnx localization models instead.")
-            return False
         except Exception as e:
-            self.error.emit(f"Localization PyTorch load error: {e}")
+            self.error.emit(f"Localization model load error: {e}")
             return False
 
-    def _run_localization(self, img_rgb_enhanced):
-        """Refresh cached anatomical class and confidence maps."""
-        try:
-            if self._loc_ort_session is not None:
-                loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
-                outputs = self._loc_ort_session.run(None, {self._loc_ort_input_name: loc_input})
-                if self._loc_output_names and "anatomy" in self._loc_output_names:
-                    anatomy = outputs[self._loc_output_names.index("anatomy")]
-                else:
-                    anatomy = outputs[1] if len(outputs) > 1 else outputs[0]
-            elif self._loc_torch_model is not None:
-                import torch as _torch
-                loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
-                with _torch.no_grad():
-                    tensor_in = _torch.from_numpy(loc_input).float()
-                    outputs = self._loc_torch_model(tensor_in)
-                    anatomy = outputs["anatomy"].cpu().numpy()
-            else:
-                return
-
-            self._loc_class_map, self._loc_confidence_map = anatomy_logits_to_map_and_confidence(anatomy)
-        except Exception as e:
-            self.error.emit(f"Localization inference error: {e}")
-            self._loc_class_map = None
-            self._loc_confidence_map = None
-
-    @staticmethod
-    def _preprocess_localization_numpy(img_rgb_enhanced):
-        """Localization model was trained with ImageNet normalization."""
-        img_float = img_rgb_enhanced.astype(np.float32) / 255.0
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img_float = (img_float - mean) / std
-        img_chw = np.transpose(img_float, (2, 0, 1))
-        return np.expand_dims(img_chw, axis=0).astype(np.float32)
-
-    def _run_qca(self, original_gray, mask_binary_uint8):
+    def _run_qca(self, original_gray, mask_binary):
         """
         Run QCA analysis on a single frame.
         Returns (qca_overlay_bgr, stenosis_info_str) or (None, "") on failure.
         """
         try:
-            bw = to_binary_mask(mask_binary_uint8)
-            bw = morph_cleanup(bw, self._qca_cfg)
-
-            # Check if mask has enough content for QCA
-            if np.sum(bw > 0) < self._qca_cfg.min_component_pixels:
-                return None, ""
-
-            branches, lesions, dt = qca_from_mask(bw, self._qca_cfg)
+            branches, lesions, dt, bw = run_qca_frame(
+                original_gray, mask_binary, self._qca_cfg,
+                class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+            )
 
             if not branches:
                 return None, ""
-
-            if self._loc_class_map is not None and self._loc_confidence_map is not None and lesions:
-                lesions = localize_lesions(lesions, self._loc_class_map, self._loc_confidence_map, radius=9)
 
             # draw_overlay expects BGR input
             qca_vis = draw_overlay(original_gray, bw, branches, lesions)
@@ -368,47 +244,27 @@ class VideoThread(QThread):
                 continue
 
             # ── Preprocessing ─────────────────────────────────────────
-            img_resized = cv2.resize(frame, (512, 512))
-            img_rgb_original = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-
-            # CLAHE enhancement (matches training preprocessing)
-            lab = cv2.cvtColor(img_rgb_original, cv2.COLOR_RGB2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            cl = clahe.apply(l)
-            limg = cv2.merge((cl, a, b))
-            img_rgb_enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
-
-            img_float = img_rgb_enhanced.astype(np.float32) / 255.0
-            img_chw = np.transpose(img_float, (2, 0, 1))
-            img_batch = np.expand_dims(img_chw, axis=0)
+            img_rgb_original, img_rgb_enhanced, img_batch, img_gray = preprocess_frame(frame)
 
             # ── Inference ─────────────────────────────────────────────
             t_start = time.perf_counter()
 
-            if self._is_onnx and self._ort_session:
-                pred = self._ort_session.run(None, {self._ort_input_name: img_batch})[0]
-                pred = 1.0 / (1.0 + np.exp(-pred))  # sigmoid
-                mask = pred.squeeze()
-            elif self._torch_model is not None:
-                import torch as _torch
-                with _torch.no_grad():
-                    tensor_in = _torch.from_numpy(img_batch).float()
-                    pred = self._torch_model(tensor_in)
-                    # Handle models returning dict (e.g. MobileUNetv3 returns {'out': ..., 'features': ...})
-                    if isinstance(pred, dict):
-                        pred = pred['out']
-                    pred = _torch.sigmoid(pred)
-                    mask = pred.squeeze().cpu().numpy()
+            if self._seg_model is not None:
+                mask_binary = segment_frame(self._seg_model, img_batch, self.threshold)
             else:
-                mask = np.zeros((512, 512), dtype=np.float32)
+                mask_binary = np.zeros((512, 512), dtype=np.uint8)
 
-            if (
-                self._loc_ort_session is not None or self._loc_torch_model is not None
-            ) and (
+            if self._loc_model is not None and (
                 self._loc_class_map is None or self._frame_index % self._loc_frame_interval == 0
             ):
-                self._run_localization(img_rgb_enhanced)
+                try:
+                    self._loc_class_map, self._loc_confidence_map = run_localization_frame(
+                        self._loc_model, img_rgb_enhanced
+                    )
+                except Exception as e:
+                    self.error.emit(f"Localization inference error: {e}")
+                    self._loc_class_map = None
+                    self._loc_confidence_map = None
 
             t_end = time.perf_counter()
             latency_ms = (t_end - t_start) * 1000.0
@@ -416,8 +272,6 @@ class VideoThread(QThread):
             self._frame_index += 1
 
             # ── Panel 2: Mask Overlay ─────────────────────────────────
-            mask_binary = (mask > self.threshold).astype(np.uint8)
-
             overlay = img_rgb_original.copy()
             color = np.array(self.overlay_color, dtype=np.uint8)
             overlay[mask_binary == 1] = color
@@ -427,11 +281,7 @@ class VideoThread(QThread):
             )
 
             # ── Panel 3: QCA Analysis ─────────────────────────────────
-            # QCA functions expect grayscale input and binary mask
-            img_gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
-            mask_for_qca = (mask_binary * 255).astype(np.uint8)
-
-            qca_vis_bgr, stenosis_info = self._run_qca(img_gray, mask_for_qca)
+            qca_vis_bgr, stenosis_info = self._run_qca(img_gray, mask_binary)
 
             if qca_vis_bgr is not None:
                 # draw_overlay returns BGR; convert to RGB for Qt display
@@ -465,6 +315,65 @@ class VideoThread(QThread):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Clinical Report Thread
+# ─────────────────────────────────────────────────────────────────────────────
+class ReportThread(QThread):
+    """
+    Background thread that runs the offline whole-video QCA analysis for each
+    queued angle/view and assembles the resulting clinical PDF report.
+    """
+    progress = pyqtSignal(str)
+    finished_ok = pyqtSignal(str)   # emits the saved PDF path
+    error = pyqtSignal(str)
+
+    def __init__(self, angles, model_path, loc_model_path, patient_info, out_path, threshold=0.5):
+        super().__init__()
+        self.angles = angles  # list of (label, video_path)
+        self.model_path = model_path
+        self.loc_model_path = loc_model_path
+        self.patient_info = patient_info
+        self.out_path = out_path
+        self.threshold = threshold
+
+    def run(self):
+        try:
+            self.progress.emit("Loading segmentation model...")
+            seg_model = SegmentationModel(self.model_path)
+
+            loc_model = None
+            if self.loc_model_path:
+                self.progress.emit("Loading localization model...")
+                loc_model = LocalizationModel(self.loc_model_path)
+
+            cfg = QCAConfig(severe_threshold=70.0)
+            angle_results = []
+
+            for label, video_path in self.angles:
+                self.progress.emit(f"Analyzing angle '{label}'...")
+
+                def _cb(i, n, _label=label):
+                    if n and (i % 10 == 0 or i == n):
+                        self.progress.emit(f"Analyzing '{_label}': frame {i}/{n}")
+
+                result = analyze_angle_video(
+                    video_path, label, seg_model, loc_model, cfg,
+                    threshold=self.threshold, progress_cb=_cb,
+                )
+                self.progress.emit(
+                    f"'{label}': {len(result.tracks)} lesion(s) found across "
+                    f"{result.n_frames_analyzed} frame(s)."
+                )
+                angle_results.append(result)
+
+            self.progress.emit("Assembling PDF report...")
+            out = render_clinical_report(self.out_path, self.patient_info, angle_results, cfg)
+
+            self.finished_ok.emit(str(out))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def ndarray_to_qpixmap(img_rgb: np.ndarray, target_w: int, target_h: int) -> QPixmap:
@@ -491,6 +400,9 @@ class MainWindow(QMainWindow):
         self.video_thread.frame_ready.connect(self._on_frame)
         self.video_thread.finished.connect(self._on_finished)
         self.video_thread.error.connect(self._on_error)
+
+        self._angles = []  # list of (label, video_path) queued for the clinical report
+        self.report_thread = None
 
         self._build_ui()
 
@@ -756,6 +668,62 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         main_layout.addLayout(btn_layout)
 
+        # ── Clinical Report ─────────────────────────────────────────
+        report_box = QGroupBox("Clinical Report")
+        report_layout = QVBoxLayout(report_box)
+        report_layout.setSpacing(8)
+
+        angles_row = QHBoxLayout()
+        angles_row.setSpacing(10)
+
+        self.list_angles = QListWidget()
+        self.list_angles.setFixedHeight(80)
+        angles_row.addWidget(self.list_angles, stretch=1)
+
+        angle_btns = QVBoxLayout()
+        self.btn_add_angle = QPushButton("Add Current Video as Angle")
+        self.btn_add_angle.clicked.connect(self._add_angle)
+        angle_btns.addWidget(self.btn_add_angle)
+
+        self.btn_remove_angle = QPushButton("Remove Selected")
+        self.btn_remove_angle.clicked.connect(self._remove_angle)
+        angle_btns.addWidget(self.btn_remove_angle)
+        angles_row.addLayout(angle_btns)
+
+        report_layout.addLayout(angles_row)
+
+        patient_row = QHBoxLayout()
+        patient_row.setSpacing(10)
+        patient_row.addWidget(QLabel("Patient ID:"))
+        self.txt_patient_id = QLineEdit()
+        self.txt_patient_id.setPlaceholderText("optional")
+        patient_row.addWidget(self.txt_patient_id)
+
+        patient_row.addWidget(QLabel("Study Date:"))
+        self.txt_study_date = QLineEdit()
+        self.txt_study_date.setPlaceholderText("optional")
+        patient_row.addWidget(self.txt_study_date)
+
+        patient_row.addWidget(QLabel("Operator:"))
+        self.txt_operator = QLineEdit()
+        self.txt_operator.setPlaceholderText("optional")
+        patient_row.addWidget(self.txt_operator)
+        report_layout.addLayout(patient_row)
+
+        gen_row = QHBoxLayout()
+        self.btn_generate_report = QPushButton("Generate Report")
+        self.btn_generate_report.setFixedHeight(36)
+        self.btn_generate_report.clicked.connect(self._generate_report)
+        gen_row.addWidget(self.btn_generate_report)
+
+        self.lbl_report_status = QLabel("No angles queued.")
+        self.lbl_report_status.setStyleSheet("color: #8B949E; padding: 4px;")
+        self.lbl_report_status.setWordWrap(True)
+        gen_row.addWidget(self.lbl_report_status, stretch=1)
+        report_layout.addLayout(gen_row)
+
+        main_layout.addWidget(report_box)
+
         # ── Status Bar ───────────────────────────────────────────────
         self.statusBar().showMessage(
             "Ready. Load a video and model to begin. "
@@ -904,10 +872,100 @@ class MainWindow(QMainWindow):
         }
         self.video_thread.overlay_color = color_map.get(text, [0, 255, 0])
 
+    # ── Clinical Report ──────────────────────────────────────────────
+    def _add_angle(self):
+        video_path = self.txt_video.text()
+        if not video_path:
+            self.statusBar().showMessage("Select a video first, then add it as an angle.")
+            return
+
+        suggested = f"View {len(self._angles) + 1}"
+        label, ok = QInputDialog.getText(
+            self, "Angle Label", "Short label for this angiographic view (e.g. RAO 30 / CRA 20):",
+            text=suggested,
+        )
+        if not ok:
+            return
+        label = label.strip() or suggested
+
+        self._angles.append((label, video_path))
+        self.list_angles.addItem(QListWidgetItem(f"{label} — {os.path.basename(video_path)}"))
+        self.lbl_report_status.setText(f"{len(self._angles)} angle(s) queued.")
+
+    def _remove_angle(self):
+        row = self.list_angles.currentRow()
+        if row < 0:
+            return
+        self.list_angles.takeItem(row)
+        del self._angles[row]
+        self.lbl_report_status.setText(f"{len(self._angles)} angle(s) queued.")
+
+    def _generate_report(self):
+        if self.report_thread is not None and self.report_thread.isRunning():
+            self.statusBar().showMessage("A report is already being generated.")
+            return
+        if not self._angles:
+            self.statusBar().showMessage("Add at least one angle video before generating a report.")
+            return
+
+        model_path = self.txt_model.text()
+        if not model_path:
+            self.statusBar().showMessage("Please select a segmentation model first.")
+            return
+        loc_model_path = self.txt_loc_model.text().strip()
+
+        default_name = f"qca_report_{time.strftime('%Y%m%d_%H%M%S')}.pdf"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Clinical Report", default_name, "PDF Files (*.pdf)"
+        )
+        if not out_path:
+            return
+
+        patient_info = {
+            "patient_id": self.txt_patient_id.text().strip(),
+            "study_date": self.txt_study_date.text().strip(),
+            "operator": self.txt_operator.text().strip(),
+        }
+
+        self.btn_generate_report.setEnabled(False)
+        self.lbl_report_status.setText("Starting report generation...")
+
+        self.report_thread = ReportThread(
+            list(self._angles), model_path, loc_model_path, patient_info, out_path,
+            threshold=self.video_thread.threshold,
+        )
+        self.report_thread.progress.connect(self._on_report_progress)
+        self.report_thread.finished_ok.connect(self._on_report_finished)
+        self.report_thread.error.connect(self._on_report_error)
+        self.report_thread.start()
+
+    @pyqtSlot(str)
+    def _on_report_progress(self, msg):
+        self.lbl_report_status.setText(msg)
+
+    @pyqtSlot(str)
+    def _on_report_finished(self, out_path):
+        self.btn_generate_report.setEnabled(True)
+        self.lbl_report_status.setText(f"Report saved to {out_path}")
+        self.statusBar().showMessage(f"Report saved to {out_path}")
+        if hasattr(os, "startfile"):
+            try:
+                os.startfile(out_path)
+            except OSError:
+                pass
+
+    @pyqtSlot(str)
+    def _on_report_error(self, msg):
+        self.btn_generate_report.setEnabled(True)
+        self.lbl_report_status.setText(f"Report generation failed: {msg}")
+        QMessageBox.warning(self, "Report Generation Failed", msg)
+
     # ── Cleanup ──────────────────────────────────────────────────────
     def closeEvent(self, event):
         self.video_thread.stop()
         self.video_thread.wait()
+        if self.report_thread is not None:
+            self.report_thread.wait()
         event.accept()
 
 

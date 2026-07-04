@@ -16,6 +16,9 @@ Usage:
 import sys
 import os
 import time
+import json
+import subprocess
+from datetime import datetime
 
 # !! CRITICAL: Import onnxruntime BEFORE PyQt5 on Windows !!
 try:
@@ -27,13 +30,20 @@ except ImportError:
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QSlider, QComboBox, QFileDialog, QHBoxLayout, QVBoxLayout,
-    QGroupBox, QStatusBar, QSizePolicy, QFrame, QLineEdit, QGridLayout
+    QGroupBox, QStatusBar, QSizePolicy, QFrame, QLineEdit, QGridLayout,
+    QTextEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPalette, QIcon
 
 import cv2
 import numpy as np
+
+try:
+    import pydicom
+    HAS_PYDICOM = True
+except ImportError:
+    HAS_PYDICOM = False
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +57,8 @@ from localization import anatomy_logits_to_map_and_confidence, localize_lesions
 
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3_augmented.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3_best.onnx"),
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
@@ -65,12 +77,112 @@ def first_existing_path(paths):
 
 
 DEFAULT_MODEL_PATH = first_existing_path(DEFAULT_SEGMENTATION_MODEL_PATHS)
+DEFAULT_3D_MODEL_PATH = first_existing_path([
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3_augmented.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3_best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "model.onnx"),
+])
+DEFAULT_CASE_ROOT = os.path.join(PROJECT_ROOT, "dicom_files")
+DEFAULT_RECON_ROOT = os.path.join(PROJECT_ROOT, "reconstructions")
 
 
 def create_ort_session(model_path):
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     return ort.InferenceSession(model_path, sess_options=options)
+
+
+def normalize_dicom_frame(frame):
+    if frame.dtype == np.uint8:
+        out = frame
+    else:
+        f = frame.astype(np.float32)
+        lo, hi = np.percentile(f, [1, 99])
+        out = np.clip((f - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+    return cv2.resize(out, (512, 512), interpolation=cv2.INTER_AREA)
+
+
+def scan_case_clips(case_dir):
+    clips = []
+    if not HAS_PYDICOM or not case_dir or not os.path.isdir(case_dir):
+        return clips
+    for root, _, files in os.walk(case_dir):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+            except Exception:
+                continue
+            if getattr(ds, "Modality", "") != "XA":
+                continue
+            if not hasattr(ds, "NumberOfFrames"):
+                continue
+            try:
+                clips.append({
+                    "path": path,
+                    "frames": int(getattr(ds, "NumberOfFrames", 1)),
+                    "primary": float(getattr(ds, "PositionerPrimaryAngle", 0.0)),
+                    "secondary": float(getattr(ds, "PositionerSecondaryAngle", 0.0)),
+                    "acquisition_time": str(getattr(ds, "AcquisitionTime", "")),
+                })
+            except Exception:
+                continue
+    clips = sorted(clips, key=lambda item: item["acquisition_time"])
+    for index, clip in enumerate(clips):
+        clip["index"] = index
+        clip["label"] = (
+            f"clip_{index:02d} | {clip['frames']} frames | "
+            f"PA {clip['primary']:.1f} | SA {clip['secondary']:.1f}"
+        )
+    return clips
+
+
+def load_pixmap_file(path, label):
+    image = cv2.imread(path, cv2.IMREAD_COLOR)
+    if image is None:
+        label.setText("Image unavailable")
+        return
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    label.setPixmap(ndarray_to_qpixmap(rgb, label.width(), label.height()))
+
+
+class ReconstructionThread(QThread):
+    progress = pyqtSignal(str)
+    completed = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, case_dir, model_path, threshold, output_dir):
+        super().__init__()
+        self.case_dir = case_dir
+        self.model_path = model_path
+        self.threshold = threshold
+        self.output_dir = output_dir
+
+    def run(self):
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            command = [
+                sys.executable,
+                os.path.join(PROJECT_ROOT, "scripts", "run_full_3d_reconstruction.py"),
+                "--dicom-dir",
+                self.case_dir,
+                "--output-dir",
+                self.output_dir,
+                "--model",
+                self.model_path,
+                "--threshold",
+                f"{self.threshold:.2f}",
+            ]
+            self.progress.emit("Selecting views, segmenting frames, and reconstructing 3D tree...")
+            result = subprocess.run(command, cwd=PROJECT_ROOT, text=True, capture_output=True)
+            if result.returncode != 0:
+                message = result.stderr.strip() or result.stdout.strip() or "3D reconstruction failed."
+                self.error.emit(message[-1200:])
+                return
+            self.completed.emit(self.output_dir)
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,23 +461,47 @@ class VideoThread(QThread):
             self.finished.emit()
             return
 
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            self.error.emit("Failed to open video.")
-            self.finished.emit()
-            return
+        cap = None
+        dicom_frames = None
+        dicom_index = 0
+        if self.video_path.lower().endswith(".dcm"):
+            if not HAS_PYDICOM:
+                self.error.emit("pydicom not installed. Cannot open DICOM cine.")
+                self.finished.emit()
+                return
+            try:
+                ds = pydicom.dcmread(self.video_path, force=True)
+                arr = ds.pixel_array
+                if arr.ndim == 2:
+                    arr = arr[None, :, :]
+                dicom_frames = arr
+            except Exception as e:
+                self.error.emit(f"Failed to open DICOM cine: {e}")
+                self.finished.emit()
+                return
+        else:
+            cap = cv2.VideoCapture(self.video_path)
+            if not cap.isOpened():
+                self.error.emit("Failed to open video.")
+                self.finished.emit()
+                return
 
         self._running = True
 
-        while self._running and cap.isOpened():
+        while self._running and (dicom_frames is not None or cap.isOpened()):
             if self._paused:
                 self.msleep(50)
                 continue
 
-            ret, frame = cap.read()
-            if not ret:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
+            if dicom_frames is not None:
+                frame_gray = normalize_dicom_frame(dicom_frames[dicom_index])
+                dicom_index = (dicom_index + 1) % len(dicom_frames)
+                frame = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
 
             # ── Preprocessing ─────────────────────────────────────────
             img_resized = cv2.resize(frame, (512, 512))
@@ -450,7 +586,8 @@ class VideoThread(QThread):
 
             self.msleep(1)
 
-        cap.release()
+        if cap is not None:
+            cap.release()
         self.finished.emit()
 
     def pause(self):
@@ -491,6 +628,11 @@ class MainWindow(QMainWindow):
         self.video_thread.frame_ready.connect(self._on_frame)
         self.video_thread.finished.connect(self._on_finished)
         self.video_thread.error.connect(self._on_error)
+        self.reconstruction_thread = None
+        self.case_dir = ""
+        self.case_clips = []
+        self.last_reconstruction_dir = ""
+        self.last_reconstruction_obj = ""
 
         self._build_ui()
 
@@ -665,13 +807,30 @@ class MainWindow(QMainWindow):
         ctrl_layout = QHBoxLayout(ctrl_box)
         ctrl_layout.setSpacing(10)
 
+        self.btn_case = QPushButton("Select Case")
+        self.btn_case.clicked.connect(self._browse_case)
+        ctrl_layout.addWidget(self.btn_case)
+
+        self.txt_case = QLineEdit()
+        self.txt_case.setPlaceholderText("Select DICOM case folder...")
+        self.txt_case.setReadOnly(True)
+        self.txt_case.setMinimumWidth(180)
+        ctrl_layout.addWidget(self.txt_case)
+
+        self.combo_case_clip = QComboBox()
+        self.combo_case_clip.setMinimumWidth(260)
+        self.combo_case_clip.addItem("No case selected")
+        self.combo_case_clip.currentIndexChanged.connect(self._on_case_clip_changed)
+        self.combo_case_clip.activated.connect(self._on_case_clip_changed)
+        ctrl_layout.addWidget(self.combo_case_clip)
+
         # Video file
-        self.btn_video = QPushButton("Open Video")
+        self.btn_video = QPushButton("Open Selected Clip")
         self.btn_video.clicked.connect(self._browse_video)
         ctrl_layout.addWidget(self.btn_video)
 
         self.txt_video = QLineEdit()
-        self.txt_video.setPlaceholderText("Select a video file...")
+        self.txt_video.setPlaceholderText("Selected case clip...")
         self.txt_video.setReadOnly(True)
         self.txt_video.setMinimumWidth(160)
         ctrl_layout.addWidget(self.txt_video)
@@ -728,7 +887,44 @@ class MainWindow(QMainWindow):
         self.combo_color.currentTextChanged.connect(self._on_color_changed)
         ctrl_layout.addWidget(self.combo_color)
 
-        main_layout.addWidget(ctrl_box)
+        main_layout.insertWidget(1, ctrl_box)
+
+        recon_box = QGroupBox("3D Reconstruction And Validation")
+        recon_layout = QGridLayout(recon_box)
+
+        self.btn_generate_3d = QPushButton("Generate 3D Reconstruction")
+        self.btn_generate_3d.clicked.connect(self._generate_3d_reconstruction)
+        recon_layout.addWidget(self.btn_generate_3d, 0, 0)
+
+        self.btn_open_3d = QPushButton("Open 3D Viewer")
+        self.btn_open_3d.clicked.connect(self._open_3d_viewer)
+        self.btn_open_3d.setEnabled(False)
+        recon_layout.addWidget(self.btn_open_3d, 0, 1)
+
+        self.lbl_recon_status = QLabel("Select a case, then generate reconstruction.")
+        self.lbl_recon_status.setWordWrap(True)
+        self.lbl_recon_status.setStyleSheet("color: #8B949E; padding: 4px;")
+        recon_layout.addWidget(self.lbl_recon_status, 0, 2, 1, 2)
+
+        self.label_val_a = QLabel("View A validation")
+        self.label_val_a.setAlignment(Qt.AlignCenter)
+        self.label_val_a.setMinimumSize(280, 170)
+        self.label_val_a.setStyleSheet("background-color: #161B22; border-radius: 8px; color: #484F58;")
+        recon_layout.addWidget(self.label_val_a, 1, 0, 1, 2)
+
+        self.label_val_b = QLabel("View B validation")
+        self.label_val_b.setAlignment(Qt.AlignCenter)
+        self.label_val_b.setMinimumSize(280, 170)
+        self.label_val_b.setStyleSheet("background-color: #161B22; border-radius: 8px; color: #484F58;")
+        recon_layout.addWidget(self.label_val_b, 1, 2, 1, 2)
+
+        self.txt_recon_summary = QTextEdit()
+        self.txt_recon_summary.setReadOnly(True)
+        self.txt_recon_summary.setMaximumHeight(110)
+        self.txt_recon_summary.setPlaceholderText("Reconstruction summary and validation metrics will appear here.")
+        recon_layout.addWidget(self.txt_recon_summary, 2, 0, 1, 4)
+
+        main_layout.insertWidget(2, recon_box)
 
         # ── Play / Pause / Stop ──────────────────────────────────────
         btn_layout = QHBoxLayout()
@@ -799,14 +995,57 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Error: {msg}")
 
     # ── Browse files ─────────────────────────────────────────────────
-    def _browse_video(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Angiogram Video", "",
-            "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)"
-        )
+    def _browse_case(self):
+        start_dir = DEFAULT_CASE_ROOT if os.path.isdir(DEFAULT_CASE_ROOT) else PROJECT_ROOT
+        path = QFileDialog.getExistingDirectory(self, "Select DICOM Case Folder", start_dir)
         if path:
-            self.txt_video.setText(path)
-            self.statusBar().showMessage(f"Video loaded: {os.path.basename(path)}")
+            self._load_case(path)
+
+    def _load_case(self, case_dir):
+        self.case_dir = case_dir
+        self.txt_case.setText(case_dir)
+        self.case_clips = scan_case_clips(case_dir)
+        self.combo_case_clip.blockSignals(True)
+        self.combo_case_clip.clear()
+        if not self.case_clips:
+            self.combo_case_clip.addItem("No XA DICOM clips found")
+            self.txt_video.clear()
+            self.statusBar().showMessage("No XA DICOM clips found in selected case.")
+        else:
+            for clip in self.case_clips:
+                self.combo_case_clip.addItem(clip["label"], clip["path"])
+            self.combo_case_clip.setCurrentIndex(0)
+            self.txt_video.setText(self.case_clips[0]["path"])
+            self.statusBar().showMessage(
+                f"Case loaded: {os.path.basename(case_dir)} ({len(self.case_clips)} XA clips)"
+            )
+        self.combo_case_clip.blockSignals(False)
+
+    def _on_case_clip_changed(self, index):
+        if 0 <= index < len(self.case_clips):
+            self._set_selected_case_clip(index, load_for_playback=False)
+
+    def _set_selected_case_clip(self, index, load_for_playback=True):
+        if not (0 <= index < len(self.case_clips)):
+            return
+        if self.video_thread.isRunning():
+            self.video_thread.stop()
+            self.video_thread.wait()
+            self.btn_play.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+        clip = self.case_clips[index]
+        self.txt_video.setText(clip["path"])
+        action = "Loaded" if load_for_playback else "Selected"
+        self.statusBar().showMessage(f"{action} {clip['label']}")
+
+    def _browse_video(self):
+        if self.case_clips:
+            index = self.combo_case_clip.currentIndex()
+            if 0 <= index < len(self.case_clips):
+                self._set_selected_case_clip(index, load_for_playback=True)
+            return
+        self.statusBar().showMessage("Please select a DICOM case first.")
 
     def _browse_model(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -827,6 +1066,121 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Localization model loaded: {os.path.basename(path)}")
 
     # ── Controls ─────────────────────────────────────────────────────
+    def _generate_3d_reconstruction(self):
+        if not self.case_dir or not os.path.isdir(self.case_dir):
+            self.statusBar().showMessage("Please select a DICOM case first.")
+            return
+        model_path = self.txt_model.text().strip()
+        if not model_path or not model_path.lower().endswith(".onnx") or not os.path.exists(model_path):
+            model_path = DEFAULT_3D_MODEL_PATH
+        if not model_path or not model_path.lower().endswith(".onnx") or not os.path.exists(model_path):
+            self.statusBar().showMessage("3D reconstruction requires an ONNX segmentation model.")
+            self.lbl_recon_status.setText("3D reconstruction requires an ONNX segmentation model.")
+            self.txt_recon_summary.setPlainText(
+                "The live viewer can use .pth, but the automatic 3D reconstruction pipeline uses ONNX Runtime.\n"
+                "Place a valid .onnx model under checkpoints or load one in the Model field."
+            )
+            return
+        if self.reconstruction_thread is not None and self.reconstruction_thread.isRunning():
+            self.statusBar().showMessage("3D reconstruction is already running.")
+            return
+
+        case_name = os.path.basename(os.path.normpath(self.case_dir))
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = os.path.join(DEFAULT_RECON_ROOT, case_name, f"run_{stamp}")
+        threshold = self.slider_threshold.value() / 100.0
+
+        self.btn_generate_3d.setEnabled(False)
+        self.btn_open_3d.setEnabled(False)
+        self.lbl_recon_status.setText("Running automatic 3D reconstruction...")
+        self.txt_recon_summary.setPlainText(
+            "Working...\n"
+            "Selecting views, segmenting frames, reconstructing, and validating.\n"
+            f"3D model: {model_path}"
+        )
+        self.label_val_a.setText("View A validation pending")
+        self.label_val_b.setText("View B validation pending")
+
+        self.reconstruction_thread = ReconstructionThread(self.case_dir, model_path, threshold, output_dir)
+        self.reconstruction_thread.progress.connect(self._on_reconstruction_progress)
+        self.reconstruction_thread.completed.connect(self._on_reconstruction_completed)
+        self.reconstruction_thread.error.connect(self._on_reconstruction_error)
+        self.reconstruction_thread.start()
+
+    @pyqtSlot(str)
+    def _on_reconstruction_progress(self, message):
+        self.statusBar().showMessage(message)
+        self.lbl_recon_status.setText(message)
+
+    @pyqtSlot(str)
+    def _on_reconstruction_completed(self, output_dir):
+        self.btn_generate_3d.setEnabled(True)
+        self.last_reconstruction_dir = output_dir
+        self.last_reconstruction_obj = os.path.join(output_dir, "hybrid_smoothed_confidence_colored.obj")
+        if not os.path.exists(self.last_reconstruction_obj):
+            self.last_reconstruction_obj = os.path.join(output_dir, "04_smoothed_confidence", "hybrid_smoothed_confidence_colored.obj")
+        self.btn_open_3d.setEnabled(os.path.exists(self.last_reconstruction_obj))
+        self._load_reconstruction_result(output_dir)
+        self.statusBar().showMessage("3D reconstruction complete.")
+
+    @pyqtSlot(str)
+    def _on_reconstruction_error(self, message):
+        self.btn_generate_3d.setEnabled(True)
+        self.btn_open_3d.setEnabled(False)
+        self.lbl_recon_status.setText("3D reconstruction failed.")
+        self.txt_recon_summary.setPlainText(message)
+        self.statusBar().showMessage("3D reconstruction failed.")
+
+    def _load_reconstruction_result(self, output_dir):
+        summary_path = os.path.join(output_dir, "full_3d_reconstruction_summary.json")
+        validation_path = os.path.join(output_dir, "final_reprojection_validation_summary.json")
+        lines = [f"Output: {output_dir}"]
+
+        if os.path.exists(summary_path):
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            pair = summary.get("selected_pair", {})
+            lines.append(
+                "Selected views: "
+                f"A clip {pair.get('view_a_clip_index', '?')} frame {pair.get('view_a_frame', '?')} | "
+                f"B clip {pair.get('view_b_clip_index', '?')} frame {pair.get('view_b_frame', '?')}"
+            )
+
+        if os.path.exists(validation_path):
+            with open(validation_path, "r", encoding="utf-8") as f:
+                validation = json.load(f)
+            for view_key in ("view_a", "view_b"):
+                view = validation.get("views", {}).get(view_key, {})
+                if view:
+                    lines.append(
+                        f"{view_key}: median {float(view.get('median_branch_error_px', 0)):.2f}px, "
+                        f"p90 {float(view.get('p90_branch_error_px', 0)):.2f}px, "
+                        f"good/review/bad {view.get('good_branches', 0)}/"
+                        f"{view.get('review_branches', 0)}/{view.get('bad_branches', 0)}"
+                    )
+
+        branch_report = os.path.join(output_dir, "branch_quality_report.csv")
+        if os.path.exists(branch_report):
+            lines.append(f"Branch report: {branch_report}")
+
+        self.lbl_recon_status.setText("3D reconstruction complete. Review validation before clinical use.")
+        self.txt_recon_summary.setPlainText("\n".join(lines))
+
+        view_a_img = os.path.join(output_dir, "final_view_a_reprojection_validation.png")
+        view_b_img = os.path.join(output_dir, "final_view_b_reprojection_validation.png")
+        if os.path.exists(view_a_img):
+            load_pixmap_file(view_a_img, self.label_val_a)
+        if os.path.exists(view_b_img):
+            load_pixmap_file(view_b_img, self.label_val_b)
+
+    def _open_3d_viewer(self):
+        if not self.last_reconstruction_obj or not os.path.exists(self.last_reconstruction_obj):
+            self.statusBar().showMessage("No reconstructed OBJ is available yet.")
+            return
+        viewer = os.path.join(PROJECT_ROOT, "src", "artery_3d_vtk_viewer.py")
+        subprocess.Popen([sys.executable, viewer, "--obj", self.last_reconstruction_obj], cwd=PROJECT_ROOT)
+        self.statusBar().showMessage("3D viewer opened.")
+
     def _play(self):
         video_path = self.txt_video.text()
         model_path = self.txt_model.text()
@@ -908,6 +1262,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.video_thread.stop()
         self.video_thread.wait()
+        if self.reconstruction_thread is not None and self.reconstruction_thread.isRunning():
+            self.reconstruction_thread.wait(1000)
         event.accept()
 
 

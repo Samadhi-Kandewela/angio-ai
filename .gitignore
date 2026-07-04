@@ -9,7 +9,7 @@ __pycache__/
 #3d middle folders/
 3d angio/
 instances_default.json
-
+reconstructions/
 dicom_case003*
 dicom_auto_selection/
 dicom_auto_selection_fast/

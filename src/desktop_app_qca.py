@@ -114,6 +114,10 @@ class VideoThread(QThread):
         self._loc_frame_interval = 15
         self._frame_index = 0
 
+        # Torch inference devices (set on load; CUDA when available)
+        self._seg_device = None
+        self._loc_device = None
+
         # QCA config
         self._qca_cfg = QCAConfig(severe_threshold=70.0)
 
@@ -155,10 +159,23 @@ class VideoThread(QThread):
                 else:
                     model = MobileUNetv3(n_classes=1, pretrained=False)
 
-                device = torch.device('cpu')
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 model.load_state_dict(torch.load(model_path, map_location=device))
+                model.to(device)
                 model.eval()
+
+                if device.type == 'cuda':
+                    torch.backends.cudnn.benchmark = True
+                    try:
+                        model = torch.compile(model, mode="reduce-overhead")
+                        # Warm up now (pays the one-time compile cost here, not on frame 1)
+                        with torch.no_grad():
+                            model(torch.zeros(1, 3, 512, 512, device=device))
+                    except Exception:
+                        pass  # fall back to eager mode if compile isn't supported here
+
                 self._torch_model = model
+                self._seg_device = device
                 return True
             except ImportError:
                 self.error.emit("PyTorch not installed. Use .onnx models instead.")
@@ -202,12 +219,24 @@ class VideoThread(QThread):
             import torch
             from model_multitask import MultiTaskMobileUNetv3
 
-            device = torch.device('cpu')
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             model = MultiTaskMobileUNetv3(pretrained=False)
             # strict=False: older checkpoints may still contain a now-removed stenosis_head
             model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
+            model.to(device)
             model.eval()
+
+            if device.type == 'cuda':
+                torch.backends.cudnn.benchmark = True
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                    with torch.no_grad():
+                        model(torch.zeros(1, 3, 512, 512, device=device))
+                except Exception:
+                    pass
+
             self._loc_torch_model = model
+            self._loc_device = device
             return True
         except ImportError:
             self.error.emit("PyTorch not installed. Use .onnx localization models instead.")
@@ -230,7 +259,7 @@ class VideoThread(QThread):
                 import torch as _torch
                 loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
                 with _torch.no_grad():
-                    tensor_in = _torch.from_numpy(loc_input).float()
+                    tensor_in = _torch.from_numpy(loc_input).float().to(self._loc_device)
                     outputs = self._loc_torch_model(tensor_in)
                     anatomy = outputs["anatomy"].cpu().numpy()
             else:
@@ -394,7 +423,7 @@ class VideoThread(QThread):
             elif self._torch_model is not None:
                 import torch as _torch
                 with _torch.no_grad():
-                    tensor_in = _torch.from_numpy(img_batch).float()
+                    tensor_in = _torch.from_numpy(img_batch).float().to(self._seg_device)
                     pred = self._torch_model(tensor_in)
                     # Handle models returning dict (e.g. MobileUNetv3 returns {'out': ..., 'features': ...})
                     if isinstance(pred, dict):

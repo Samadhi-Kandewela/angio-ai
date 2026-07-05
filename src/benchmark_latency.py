@@ -25,7 +25,7 @@ if SRC_DIR not in sys.path:
 from model_lightweight import MobileUNetv3
 from model_mask_localization import MaskLocalizationNet
 from model_multitask import MultiTaskMobileUNetv3
-from localization_labels import NUM_ANATOMY_CLASSES
+from localization_labels import NUM_ANATOMY_CLASSES, MERGED_NUM_ANATOMY_CLASSES
 
 
 def measure(fn, warmup=10, runs=100):
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     seg_model.eval()
 
     loc_model = MaskLocalizationNet(
-        n_anatomy_classes=NUM_ANATOMY_CLASSES, pretrained=False
+        n_anatomy_classes=MERGED_NUM_ANATOMY_CLASSES, pretrained=False
     ).to(device)
     loc_model.load_state_dict(
         torch.load(args.loc_checkpoint, map_location=device)

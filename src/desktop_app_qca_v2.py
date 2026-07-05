@@ -50,6 +50,9 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    # Preferred: two-stage mask-input model (15 merged classes, more accurate)
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.pth"),
+    # Fallback: older single-network image-input model (26 raw classes)
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.onnx"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_best.onnx"),
@@ -114,6 +117,15 @@ class VideoThread(QThread):
         self._loc_frame_interval = 15
         self._frame_index = 0
 
+        # "mask" = new two-stage MaskLocalizationNet (mask input, 15 merged classes)
+        # "multitask" = old MultiTaskMobileUNetv3 (image input, 26 raw classes)
+        self._loc_model_type = None
+        self._loc_label_fns = None  # (label_fn, group_fn, artery_fn) matching _loc_model_type
+
+        # Torch inference devices (set on load; CUDA when available)
+        self._seg_device = None
+        self._loc_device = None
+
         # QCA config
         self._qca_cfg = QCAConfig(severe_threshold=70.0)
 
@@ -155,10 +167,30 @@ class VideoThread(QThread):
                 else:
                     model = MobileUNetv3(n_classes=1, pretrained=False)
 
-                device = torch.device('cpu')
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 model.load_state_dict(torch.load(model_path, map_location=device))
+                model.to(device)
                 model.eval()
+
+                if device.type == 'cuda':
+                    torch.backends.cudnn.benchmark = True
+                    try:
+                        # NOTE: mode="reduce-overhead" uses CUDA graphs, which
+                        # bind to thread-local state on whichever thread first
+                        # runs the model. Load happens on the main thread but
+                        # inference runs inside VideoThread's own OS thread,
+                        # so reduce-overhead crashes here (AssertionError in
+                        # cudagraph_trees). Default mode compiles/fuses too
+                        # but has no such thread affinity.
+                        model = torch.compile(model)
+                        # Warm up now (pays the one-time compile cost here, not on frame 1)
+                        with torch.no_grad():
+                            model(torch.zeros(1, 3, 512, 512, device=device))
+                    except Exception:
+                        pass  # fall back to eager mode if compile isn't supported here
+
                 self._torch_model = model
+                self._seg_device = device
                 return True
             except ImportError:
                 self.error.emit("PyTorch not installed. Use .onnx models instead.")
@@ -168,7 +200,12 @@ class VideoThread(QThread):
                 return False
 
     def load_localization_model(self, model_path):
-        """Load optional multitask localization model (ONNX or PyTorch)."""
+        """Load optional localization model (ONNX or PyTorch).
+
+        Supports two architectures, auto-detected from the filename:
+          - "mask_localization*"  -> new MaskLocalizationNet (mask input, 15 merged classes)
+          - anything else         -> old MultiTaskMobileUNetv3 (image input, 26 raw classes)
+        """
         self.localization_model_path = model_path
         self._loc_ort_session = None
         self._loc_ort_input_name = None
@@ -176,6 +213,8 @@ class VideoThread(QThread):
         self._loc_torch_model = None
         self._loc_class_map = None
         self._loc_confidence_map = None
+        self._loc_model_type = None
+        self._loc_label_fns = None
         self._frame_index = 0
 
         if not model_path:
@@ -183,6 +222,20 @@ class VideoThread(QThread):
         if not os.path.exists(model_path):
             self.error.emit(f"Localization model not found: {model_path}")
             return False
+
+        name = os.path.basename(model_path).lower()
+        is_mask_model = 'mask_localization' in model_path.lower() or name.startswith('mask')
+        self._loc_model_type = 'mask' if is_mask_model else 'multitask'
+
+        from localization_labels import (
+            segment_label, segment_group, segment_artery,
+            merged_segment_label, merged_segment_group, merged_segment_artery,
+        )
+        self._loc_label_fns = (
+            (merged_segment_label, merged_segment_group, merged_segment_artery)
+            if is_mask_model else
+            (segment_label, segment_group, segment_artery)
+        )
 
         self._loc_is_onnx = model_path.lower().endswith('.onnx')
         if self._loc_is_onnx:
@@ -200,14 +253,41 @@ class VideoThread(QThread):
 
         try:
             import torch
-            from model_multitask import MultiTaskMobileUNetv3
 
-            device = torch.device('cpu')
-            model = MultiTaskMobileUNetv3(pretrained=False)
-            # strict=False: older checkpoints may still contain a now-removed stenosis_head
-            model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            if is_mask_model:
+                from model_mask_localization import MaskLocalizationNet
+                from localization_labels import MERGED_NUM_ANATOMY_CLASSES
+
+                model = MaskLocalizationNet(n_anatomy_classes=MERGED_NUM_ANATOMY_CLASSES, pretrained=False)
+                model.load_state_dict(torch.load(model_path, map_location=device))
+                warmup_input = torch.zeros(1, 1, 512, 512, device=device)  # 1-channel mask
+            else:
+                from model_multitask import MultiTaskMobileUNetv3
+
+                model = MultiTaskMobileUNetv3(pretrained=False)
+                # strict=False: older checkpoints may still contain a now-removed stenosis_head
+                model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
+                warmup_input = torch.zeros(1, 3, 512, 512, device=device)  # 3-channel image
+
+            model.to(device)
             model.eval()
+
+            if device.type == 'cuda':
+                torch.backends.cudnn.benchmark = True
+                try:
+                    # See note above: default mode, not reduce-overhead (CUDA
+                    # graphs from reduce-overhead crash when compile/warmup
+                    # happens on a different thread than actual inference).
+                    model = torch.compile(model)
+                    with torch.no_grad():
+                        model(warmup_input)
+                except Exception:
+                    pass
+
             self._loc_torch_model = model
+            self._loc_device = device
             return True
         except ImportError:
             self.error.emit("PyTorch not installed. Use .onnx localization models instead.")
@@ -216,11 +296,21 @@ class VideoThread(QThread):
             self.error.emit(f"Localization PyTorch load error: {e}")
             return False
 
-    def _run_localization(self, img_rgb_enhanced):
-        """Refresh cached anatomical class and confidence maps."""
+    def _run_localization(self, img_rgb_enhanced, vessel_mask_binary):
+        """Refresh cached anatomical class and confidence maps.
+
+        vessel_mask_binary: (H, W) uint8/bool array, the segmentation model's
+        already-thresholded prediction for this frame. Only used by the new
+        "mask" model type, which takes the mask as input instead of the image.
+        """
         try:
-            if self._loc_ort_session is not None:
+            is_mask_model = self._loc_model_type == 'mask'
+            if is_mask_model:
+                loc_input = vessel_mask_binary.astype(np.float32)[None, None, :, :]  # (1,1,H,W)
+            else:
                 loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
+
+            if self._loc_ort_session is not None:
                 outputs = self._loc_ort_session.run(None, {self._loc_ort_input_name: loc_input})
                 if self._loc_output_names and "anatomy" in self._loc_output_names:
                     anatomy = outputs[self._loc_output_names.index("anatomy")]
@@ -228,15 +318,25 @@ class VideoThread(QThread):
                     anatomy = outputs[1] if len(outputs) > 1 else outputs[0]
             elif self._loc_torch_model is not None:
                 import torch as _torch
-                loc_input = self._preprocess_localization_numpy(img_rgb_enhanced)
                 with _torch.no_grad():
-                    tensor_in = _torch.from_numpy(loc_input).float()
+                    tensor_in = _torch.from_numpy(loc_input).float().to(self._loc_device)
                     outputs = self._loc_torch_model(tensor_in)
                     anatomy = outputs["anatomy"].cpu().numpy()
             else:
                 return
 
-            self._loc_class_map, self._loc_confidence_map = anatomy_logits_to_map_and_confidence(anatomy)
+            class_map, confidence_map = anatomy_logits_to_map_and_confidence(anatomy)
+
+            if is_mask_model:
+                # This model is only ever supervised on ground-truth vessel
+                # pixels (background is excluded from its training loss), so
+                # its raw prediction is meaningless outside the vessel mask.
+                # Constrain it to where the segmentation model actually found
+                # vessel, same fix as predict_pipeline.py.
+                class_map = class_map.copy()
+                class_map[vessel_mask_binary == 0] = 0
+
+            self._loc_class_map, self._loc_confidence_map = class_map, confidence_map
         except Exception as e:
             self.error.emit(f"Localization inference error: {e}")
             self._loc_class_map = None
@@ -271,7 +371,11 @@ class VideoThread(QThread):
                 return None, ""
 
             if self._loc_class_map is not None and self._loc_confidence_map is not None and lesions:
-                lesions = localize_lesions(lesions, self._loc_class_map, self._loc_confidence_map, radius=9)
+                label_fn, group_fn, artery_fn = self._loc_label_fns
+                lesions = localize_lesions(
+                    lesions, self._loc_class_map, self._loc_confidence_map, radius=9,
+                    label_fn=label_fn, group_fn=group_fn, artery_fn=artery_fn,
+                )
 
             # draw_overlay expects BGR input
             qca_vis = draw_overlay(original_gray, bw, branches, lesions)
@@ -356,6 +460,19 @@ class VideoThread(QThread):
             self.finished.emit()
             return
 
+        # Pace playback to the video's actual recorded FPS. Inference is now
+        # fast enough (GPU + compile) that without this, frames get read and
+        # displayed as fast as the hardware allows rather than at the video's
+        # real speed. Some files report bogus FPS metadata (0, or absurdly
+        # high values from certain codecs/containers), so clamp to a sane
+        # range and fall back to 30 otherwise.
+        raw_reported_fps = cap.get(cv2.CAP_PROP_FPS)
+        if raw_reported_fps and 1.0 <= raw_reported_fps <= 120.0:
+            source_fps = raw_reported_fps
+        else:
+            source_fps = 30.0
+        target_frame_time_ms = 1000.0 / source_fps
+
         self._running = True
 
         while self._running and cap.isOpened():
@@ -367,6 +484,8 @@ class VideoThread(QThread):
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
+
+            frame_wall_start = time.perf_counter()
 
             # ── Preprocessing ─────────────────────────────────────────
             img_resized = cv2.resize(frame, (512, 512))
@@ -394,7 +513,7 @@ class VideoThread(QThread):
             elif self._torch_model is not None:
                 import torch as _torch
                 with _torch.no_grad():
-                    tensor_in = _torch.from_numpy(img_batch).float()
+                    tensor_in = _torch.from_numpy(img_batch).float().to(self._seg_device)
                     pred = self._torch_model(tensor_in)
                     # Handle models returning dict (e.g. MobileUNetv3 returns {'out': ..., 'features': ...})
                     if isinstance(pred, dict):
@@ -404,12 +523,16 @@ class VideoThread(QThread):
             else:
                 mask = np.zeros((512, 512), dtype=np.float32)
 
+            # Needed for the mask overlay below, and as the localization
+            # model's input if it's the new mask-input architecture.
+            mask_binary = (mask > self.threshold).astype(np.uint8)
+
             if (
                 self._loc_ort_session is not None or self._loc_torch_model is not None
             ) and (
                 self._loc_class_map is None or self._frame_index % self._loc_frame_interval == 0
             ):
-                self._run_localization(img_rgb_enhanced)
+                self._run_localization(img_rgb_enhanced, mask_binary)
 
             t_end = time.perf_counter()
             latency_ms = (t_end - t_start) * 1000.0
@@ -417,7 +540,6 @@ class VideoThread(QThread):
             self._frame_index += 1
 
             # ── Panel 2: Mask Overlay ─────────────────────────────────
-            mask_binary = (mask > self.threshold).astype(np.uint8)
 
             overlay = img_rgb_original.copy()
             color = np.array(self.overlay_color, dtype=np.uint8)
@@ -449,7 +571,12 @@ class VideoThread(QThread):
                 fps, latency_ms, stenosis_info
             )
 
-            self.msleep(1)
+            # Sleep off whatever's left of this frame's real-time budget, so
+            # playback matches the video's actual recorded speed instead of
+            # running as fast as the hardware allows.
+            elapsed_ms = (time.perf_counter() - frame_wall_start) * 1000.0
+            remaining_ms = target_frame_time_ms - elapsed_ms
+            self.msleep(max(1, int(remaining_ms)))
 
         cap.release()
         self.finished.emit()
@@ -635,12 +762,17 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(panels_layout, stretch=1)
 
         # ── Stenosis Info Bar ────────────────────────────────────────
+        # Fixed height (not just a size hint) so wrapping to 2-3 lines never
+        # grows this box and steals space from the video panels above it,
+        # which is what was causing the layout to visibly shift/jump.
         stenosis_box = QGroupBox("Stenosis Report")
+        stenosis_box.setFixedHeight(92)
         stenosis_layout = QHBoxLayout(stenosis_box)
         self.lbl_stenosis = QLabel("No analysis yet - load a video and press Play")
         self.lbl_stenosis.setFont(QFont("Consolas", 12, QFont.Bold))
         self.lbl_stenosis.setStyleSheet("color: #FF6B6B; padding: 4px;")
         self.lbl_stenosis.setWordWrap(True)
+        self.lbl_stenosis.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         stenosis_layout.addWidget(self.lbl_stenosis)
         main_layout.addWidget(stenosis_box)
 

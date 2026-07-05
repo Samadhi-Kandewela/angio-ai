@@ -38,6 +38,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -144,6 +145,27 @@ def load_branch_report(obj_path: Path) -> Dict[int, Dict[str, str]]:
     return {}
 
 
+def load_bad_reprojection_branch_ids(obj_path: Path) -> set[int]:
+    candidates = [
+        obj_path.with_name("final_reprojection_validation_report.csv"),
+        obj_path.with_name("reprojection_validation_report.csv"),
+    ]
+    bad_ids: set[int] = set()
+    for csv_path in candidates:
+        if not csv_path.exists():
+            continue
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                try:
+                    if str(row.get("validation_status", "")).lower() == "bad":
+                        bad_ids.add(int(row["branch_id"]))
+                except Exception:
+                    continue
+        if bad_ids:
+            break
+    return bad_ids
+
+
 def branch_id_from_name(name: str) -> Optional[int]:
     match = re.search(r"branch[_-](\d+)", name)
     return int(match.group(1)) if match else None
@@ -196,6 +218,7 @@ class VTKArteryViewer(QMainWindow):
         self.obj_path: Optional[Path] = None
         self.mesh: Optional[ObjMesh] = None
         self.report: Dict[int, Dict[str, str]] = {}
+        self.bad_reprojection_branch_ids: set[int] = set()
         self.summary: Dict[str, object] = {}
         self.branch_actors: Dict[int, List[vtk.vtkActor]] = {}
         self.all_actors: List[vtk.vtkActor] = []
@@ -234,6 +257,9 @@ class VTKArteryViewer(QMainWindow):
         self.spin_secondary.setFixedWidth(90)
         self.btn_apply_angle = QPushButton("Apply Angle")
         self.btn_apply_angle.clicked.connect(self.apply_manual_angle_view)
+        self.chk_hide_bad = QCheckBox("Hide Bad Branches")
+        self.chk_hide_bad.setToolTip("Hide branches marked red/bad in final reprojection validation.")
+        self.chk_hide_bad.stateChanged.connect(self.apply_branch_visibility_filter)
         self.combo_image_orientation = QComboBox()
         self.combo_image_orientation.addItems(
             [
@@ -298,6 +324,7 @@ class VTKArteryViewer(QMainWindow):
         controls.addWidget(QLabel("Image"))
         controls.addWidget(self.combo_image_orientation)
         controls.addWidget(self.btn_apply_angle)
+        controls.addWidget(self.chk_hide_bad)
         controls.addStretch(1)
         left_layout.addLayout(controls)
         left_layout.addWidget(self.lbl_path)
@@ -334,12 +361,19 @@ class VTKArteryViewer(QMainWindow):
         try:
             self.mesh = parse_obj(path)
             self.report = load_branch_report(path)
+            self.bad_reprojection_branch_ids = load_bad_reprojection_branch_ids(path)
             self.summary = self.load_pipeline_summary(path)
             self.obj_path = path
             self.lbl_path.setText(str(path))
             self.populate_table()
             self.populate_validation_panel()
             self.update_angle_controls_from_summary()
+            self.chk_hide_bad.setEnabled(bool(self.bad_reprojection_branch_ids))
+            self.chk_hide_bad.setToolTip(
+                f"Hide bad reprojection branches: {sorted(self.bad_reprojection_branch_ids)}"
+                if self.bad_reprojection_branch_ids
+                else "No bad reprojection branch list found beside this OBJ."
+            )
             self.render_mesh()
         except Exception as exc:
             QMessageBox.critical(self, "Failed to load OBJ", str(exc))
@@ -501,7 +535,18 @@ class VTKArteryViewer(QMainWindow):
 
         self.add_orientation_marker()
 
+        self.apply_branch_visibility_filter(render=False)
         self.reset_camera()
+
+    def apply_branch_visibility_filter(self, state=None, render: bool = True):
+        hide_bad = self.chk_hide_bad.isChecked() if hasattr(self, "chk_hide_bad") else False
+        hidden_ids = self.bad_reprojection_branch_ids if hide_bad else set()
+        for branch_id, actors in self.branch_actors.items():
+            visible = branch_id not in hidden_ids
+            for actor in actors:
+                actor.SetVisibility(1 if visible else 0)
+        if render:
+            self.vtk_widget.GetRenderWindow().Render()
 
     def add_orientation_marker(self):
         if self.orientation_widget is not None:
@@ -705,6 +750,10 @@ class VTKArteryViewer(QMainWindow):
 
         for branch_id, actors in self.branch_actors.items():
             for actor in actors:
+                if self.chk_hide_bad.isChecked() and branch_id in self.bad_reprojection_branch_ids:
+                    actor.SetVisibility(0)
+                    continue
+                actor.SetVisibility(1)
                 base_status = self.status_from_parts(branch_id)
                 base_color = MATERIAL_COLORS.get(base_status, (0.78, 0.78, 0.78))
                 if selected_branch is not None and branch_id == selected_branch:

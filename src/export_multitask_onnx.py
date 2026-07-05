@@ -19,7 +19,7 @@ class ONNXMultiTaskWrapper(torch.nn.Module):
 
     def forward(self, x):
         out = self.model(x)
-        return out["vessel"], out["anatomy"], out["stenosis"]
+        return out["vessel"], out["anatomy"]
 
 
 def export_model(model_path, output_path, image_size=512):
@@ -29,7 +29,8 @@ def export_model(model_path, output_path, image_size=512):
         pretrained=False,
     )
     state_dict = torch.load(model_path, map_location=device)
-    model.load_state_dict(state_dict)
+    # strict=False: older checkpoints may still contain a now-removed stenosis_head
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     wrapper = ONNXMultiTaskWrapper(model).eval()
@@ -44,12 +45,11 @@ def export_model(model_path, output_path, image_size=512):
         opset_version=17,
         do_constant_folding=True,
         input_names=["input"],
-        output_names=["vessel", "anatomy", "stenosis"],
+        output_names=["vessel", "anatomy"],
         dynamic_axes={
             "input": {0: "batch_size"},
             "vessel": {0: "batch_size"},
             "anatomy": {0: "batch_size"},
-            "stenosis": {0: "batch_size"},
         },
     )
 
@@ -62,7 +62,7 @@ def export_model(model_path, output_path, image_size=512):
     with torch.no_grad():
         torch_outs = wrapper(dummy_input)
 
-    for name, torch_out, ort_out in zip(["vessel", "anatomy", "stenosis"], torch_outs, ort_outs):
+    for name, torch_out, ort_out in zip(["vessel", "anatomy"], torch_outs, ort_outs):
         np.testing.assert_allclose(torch_out.numpy(), ort_out, rtol=1e-2, atol=1e-3)
         print(f"{name} output verified: {tuple(ort_out.shape)}")
 

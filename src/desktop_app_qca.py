@@ -103,6 +103,10 @@ class VideoThread(QThread):
         self._loc_frame_interval = 15
         self._frame_index = 0
 
+        # Torch inference devices (set on load; CUDA when available)
+        self._seg_device = None
+        self._loc_device = None
+
         # QCA config
         self._qca_cfg = QCAConfig(severe_threshold=70.0)
 

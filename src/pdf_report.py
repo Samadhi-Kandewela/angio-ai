@@ -21,7 +21,8 @@ from report_engine import AngleResult, FrameRecord, LesionTrack, generate_reason
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
-    "MODERATE": "#FF7F0E",
+    "SIGNIFICANT": "#FF7F0E",
+    "MODERATE": "#DBB40C",
     "MILD": "#BCBD22",
 }
 
@@ -52,6 +53,152 @@ def render_clinical_report(out_path, patient_info: Dict[str, str],
     return out_path
 
 
+def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
+                                     view_summaries: List[dict], cfg: QCAConfig) -> Path:
+    """
+    Final cross-view clinical diagnosis report, assembled from saved
+    (JSON + PNG) per-view results (see analysis_results_store.py) rather than
+    live AngleResults -- so it can be (re)generated at any time after each
+    view has been analyzed and saved, independent of the analysis session
+    that produced them.
+
+    Clinical-only presentation: per-view stenosis location/severity diagrams
+    and a combined summary table -- no explainable-AI lesion detail (crops,
+    heatmaps, reasoning) -- with an explicit AI-generated disclaimer.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    all_lesions = [(vs, les) for vs in view_summaries for les in vs.get("lesions", [])]
+    all_lesions.sort(key=lambda pair: pair[1]["DS_percent"], reverse=True)
+
+    any_localization = any(vs.get("has_localization") for vs in view_summaries)
+    all_localization = all(vs.get("has_localization") for vs in view_summaries) if view_summaries else True
+
+    with PdfPages(out_path) as pdf:
+        _add_diagnosis_title_page(pdf, patient_info, view_summaries, all_lesions)
+
+        for vs in view_summaries:
+            if vs.get("lesions") and vs.get("summary_image"):
+                _add_diagnosis_view_page(pdf, vs)
+
+        _add_methodology_page(pdf, cfg, any_localization, all_localization)
+
+    return out_path
+
+
+def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
+
+    ax = fig.add_axes((0.08, 0.08, 0.84, 0.82))
+    ax.axis("off")
+
+    ax.text(0, 0.995, "⚠ AI-GENERATED ANALYSIS — for clinical correlation, not a standalone diagnosis",
+            transform=ax.transAxes, fontsize=10.5, fontweight="bold", color="#D62728", va="top")
+
+    view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
+    lines = [
+        f"Patient ID: {patient_info.get('patient_id') or 'Not specified'}",
+        f"Patient Name: {patient_info.get('full_name') or 'Not specified'}",
+        f"Study Date: {patient_info.get('study_date') or 'Not specified'}",
+        f"Operator: {patient_info.get('operator') or 'Not specified'}",
+        f"Report generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Angiographic views analyzed: {len(view_summaries)} ({view_names})",
+        "",
+    ]
+
+    y = 0.93
+    for line in lines:
+        ax.text(0, y, line, transform=ax.transAxes, fontsize=11, va="top")
+        y -= 0.045
+
+    if not all_lesions:
+        ax.text(0, y, "Impression: No significant stenosis detected across analyzed views.",
+                transform=ax.transAxes, fontsize=11, va="top")
+        y -= 0.045
+    else:
+        worst_vs, worst_les = all_lesions[0]
+        impression = (
+            f"Impression: {len(all_lesions)} lesion(s) detected across {len(view_summaries)} view(s). "
+            f"Most severe: {worst_les['DS_percent']:.1f}% DS ({worst_les['severity']}) in "
+            f"{worst_les['label']} ({worst_vs['view_label']})."
+        )
+        for wrapped in textwrap.wrap(impression, width=92):
+            ax.text(0, y, wrapped, transform=ax.transAxes, fontsize=11, va="top")
+            y -= 0.045
+
+    if all_lesions:
+        y -= 0.03
+        ax.text(0, y, "Stenosis Summary (most to least severe):", transform=ax.transAxes,
+                fontsize=12, fontweight="bold", va="top")
+        y -= 0.045
+
+        col_x = [0.0, 0.20, 0.55, 0.68, 0.80]
+        headers = ["View", "Location", "Severity", "DS%", "Confidence"]
+        for cx, h in zip(col_x, headers):
+            ax.text(cx, y, h, transform=ax.transAxes, fontsize=9, fontweight="bold", va="top")
+        y -= 0.032
+
+        def _trunc(s, n):
+            return s if len(s) <= n else s[:n - 1] + "…"
+
+        for vs, les in all_lesions:
+            if y < 0.05:
+                ax.text(0, y, "... see per-view pages for the remainder.",
+                        transform=ax.transAxes, fontsize=8.5, style="italic", va="top")
+                break
+            row = [
+                _trunc(vs["view_label"], 16), _trunc(les["label"], 26), les["severity"],
+                f"{les['DS_percent']:.1f}%", f"{les.get('confidence', 0):.2f}",
+            ]
+            color = _SEVERITY_RGB_MPL.get(les["severity"], "black")
+            for cx, val in zip(col_x, row):
+                ax.text(cx, y, val, transform=ax.transAxes, fontsize=8.5, va="top", color=color)
+            y -= 0.028
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _add_diagnosis_view_page(pdf, view_summary: dict):
+    view_dir = view_summary.get("_view_dir")
+    image_name = view_summary.get("summary_image")
+    if not view_dir or not image_name:
+        return
+    image_path = Path(view_dir) / image_name
+    if not image_path.exists():
+        return
+
+    img = plt.imread(str(image_path))
+
+    fig = plt.figure(figsize=(8.5, 11))
+    ax_img = fig.add_axes((0.06, 0.20, 0.88, 0.68))
+    ax_img.imshow(img)
+    ax_img.axis("off")
+    ax_img.set_title(f"{view_summary['view_label']} — Stenosis Location & Severity",
+                     fontsize=14, fontweight="bold")
+
+    lesions = view_summary.get("lesions", [])
+    shown = sum(1 for les in lesions if les.get("co_visible_in_summary_frame"))
+    caption = (
+        f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram; "
+        "all are listed in the summary table."
+    )
+    fig.text(0.5, 0.155, caption, ha="center", fontsize=8.5, style="italic")
+
+    ax_legend = fig.add_axes((0.06, 0.03, 0.88, 0.10))
+    ax_legend.set_xlim(0, 1)
+    ax_legend.set_ylim(0, 1)
+    ax_legend.axis("off")
+    for i, (label, color) in enumerate([("SEVERE (≥70% DS)", "#D62728"), ("SIGNIFICANT (50–69% DS)", "#FF7F0E")]):
+        ax_legend.scatter([0.05 + i * 0.4], [0.5], color=color, s=80)
+        ax_legend.text(0.09 + i * 0.4, 0.5, label, fontsize=9, va="center")
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary-frame overlay (uses each track's representative DS%/severity, not
 # this single frame's own noisy value, so numbers match the per-lesion pages)
@@ -75,7 +222,7 @@ def _draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.n
             continue
         rep = t.representative
         sev = rep["severity"]
-        if sev not in ("SEVERE", "MODERATE"):
+        if sev not in ("SEVERE", "SIGNIFICANT"):
             continue
 
         color = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
@@ -182,7 +329,7 @@ def _add_angle_summary_page(pdf, ar: AngleResult):
 
     shown = sum(
         1 for t in ar.tracks
-        if t.representative["severity"] in ("SEVERE", "MODERATE") and rec.frame_idx in t.frame_indices
+        if t.representative["severity"] in ("SEVERE", "SIGNIFICANT") and rec.frame_idx in t.frame_indices
     )
     caption = (
         f"{shown} of {len(ar.tracks)} detected lesion(s) in this view are co-visible in this frame; "
@@ -194,7 +341,7 @@ def _add_angle_summary_page(pdf, ar: AngleResult):
     ax_legend.set_xlim(0, 1)
     ax_legend.set_ylim(0, 1)
     ax_legend.axis("off")
-    for i, (label, color) in enumerate([("SEVERE (≥70% DS)", "#D62728"), ("MODERATE (50–69% DS)", "#FF7F0E")]):
+    for i, (label, color) in enumerate([("SEVERE (≥70% DS)", "#D62728"), ("SIGNIFICANT (50–69% DS)", "#FF7F0E")]):
         ax_legend.scatter([0.05 + i * 0.4], [0.5], color=color, s=80)
         ax_legend.text(0.09 + i * 0.4, 0.5, label, fontsize=9, va="center")
 
@@ -230,9 +377,10 @@ def _add_methodology_page(pdf, cfg: QCAConfig, any_localization: bool, all_local
         "(QCA) pipeline: deep-learning vessel segmentation, skeleton-based centerline",
         "extraction, per-branch lesion detection, and AHA/SYNTAX anatomical localization.",
         "",
-        f"Severity thresholds follow the ACC/AHA/ESC consensus: Severe ≥{cfg.severe_threshold:.0f}%",
-        f"diameter stenosis (DS), Moderate ≥{cfg.moderate_threshold:.0f}% DS, below that classified",
-        "Mild / non-obstructive.",
+        f"Severity follows the JACIT/ARC-2 hierarchical consensus: Severe ≥{cfg.severe_threshold:.0f}%",
+        f"diameter stenosis (DS) regardless of symptoms; Significant ≥{cfg.significant_threshold:.0f}% DS,",
+        f"actionable if symptomatic or a positive functional test; Moderate ≥{cfg.moderate_threshold:.0f}% DS;",
+        "below that classified Mild / non-obstructive.",
         "",
         "Each lesion's reported measurement is taken from the single video frame where",
         "that lesion's detection confidence (edge sharpness + reference-segment quality +",

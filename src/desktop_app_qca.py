@@ -226,6 +226,10 @@ class VideoThread(QThread):
         self._loc_frame_interval = 15
         self._frame_index = 0
 
+        # Torch inference devices (set on load; CUDA when available)
+        self._seg_device = None
+        self._loc_device = None
+
         # QCA config
         self._qca_cfg = QCAConfig(severe_threshold=70.0)
 
@@ -975,8 +979,10 @@ class MainWindow(QMainWindow):
             # Color-code the severity
             if "SEVERE" in stenosis_info:
                 self.lbl_stenosis.setStyleSheet("color: #FF4444; padding: 4px; font-weight: bold;")
-            elif "MODERATE" in stenosis_info:
+            elif "SIGNIFICANT" in stenosis_info:
                 self.lbl_stenosis.setStyleSheet("color: #FFA657; padding: 4px; font-weight: bold;")
+            elif "MODERATE" in stenosis_info:
+                self.lbl_stenosis.setStyleSheet("color: #E8D44D; padding: 4px; font-weight: bold;")
             elif "MILD" in stenosis_info:
                 self.lbl_stenosis.setStyleSheet("color: #00CC66; padding: 4px; font-weight: bold;")
             else:
@@ -1265,6 +1271,7 @@ class MainWindow(QMainWindow):
         if self.reconstruction_thread is not None and self.reconstruction_thread.isRunning():
             self.reconstruction_thread.wait(1000)
         event.accept()
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

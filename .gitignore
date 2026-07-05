@@ -60,6 +60,10 @@ checkpoints/
 angio only/
 3d_papers/
 dicom_sample/
+dicom_case*
+dicom_files/
+instances_default.json
+3d angio/
 .Python
 build/
 develop-eggs/
@@ -251,3 +255,4 @@ plot_*.py
 # /checkpoints/**/*.zip
 # !/checkpoints/**/*.onnx
 # !/checkpoints/**/*.pth
+patient_data/

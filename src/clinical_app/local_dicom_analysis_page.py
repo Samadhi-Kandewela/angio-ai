@@ -15,13 +15,15 @@ from PySide6.QtGui import QImage, QPixmap, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
     QComboBox, QSlider, QPushButton, QFrame, QFileDialog, QListWidget,
-    QListWidgetItem, QCheckBox, QMessageBox, QSizePolicy, QScrollArea
+    QListWidgetItem, QCheckBox, QMessageBox, QSizePolicy, QScrollArea, QInputDialog
 )
 
 import patient_store
+import analysis_results_store
 from dicom_loader import discover_series, load_series_frames
 from dicom_analysis_thread import DicomAnalysisThread
 from frame_pipeline import SegmentationModel, LocalizationModel
+from report_engine import analyze_frame_list
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # angio-ai/
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
@@ -80,6 +82,41 @@ class _SeriesLoadThread(QThread):
             self.error.emit(str(e))
 
 
+class _ViewAnalysisThread(QThread):
+    """
+    Runs the whole-series QCA analysis (analyze_frame_list) off the UI
+    thread -- aggregating detections across every frame of a series into
+    authoritative per-lesion tracks takes much longer than analyzing one
+    live frame, so it must not block the UI.
+    """
+    progress = Signal(str)
+    finished_ok = Signal(object)  # AngleResult
+    error = Signal(str)
+
+    def __init__(self, frames, view_label, seg_model, loc_model, cfg, threshold):
+        super().__init__()
+        self.frames = frames
+        self.view_label = view_label
+        self.seg_model = seg_model
+        self.loc_model = loc_model
+        self.cfg = cfg
+        self.threshold = threshold
+
+    def run(self):
+        try:
+            def _cb(i, n):
+                if n:
+                    self.progress.emit(f"Analyzing frame {i}/{n}...")
+
+            result = analyze_frame_list(
+                self.frames, self.view_label, self.seg_model, self.loc_model,
+                self.cfg, threshold=self.threshold, progress_cb=_cb,
+            )
+            self.finished_ok.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class LocalDicomAnalysisPage(QWidget):
     """DICOM-file analysis page: case/series picker + AI-model viewer."""
 
@@ -91,6 +128,10 @@ class LocalDicomAnalysisPage(QWidget):
         self._series = []         # DicomSeriesInfo list for the selected case
         self._series_frames = []  # loaded BGR frames for the selected series
         self._series_load_thread = None
+        self._view_analysis_thread = None
+        self._pending_case_id = None
+        self._last_view_report = None
+        self._last_final_report = None
         self.analysis_thread = DicomAnalysisThread()
         self.analysis_thread.frame_ready.connect(self._on_frame_ready)
         self.analysis_thread.playback_finished.connect(self._on_playback_finished)
@@ -134,6 +175,7 @@ class LocalDicomAnalysisPage(QWidget):
         layout.addWidget(self._build_model_card())
         layout.addWidget(self._build_viewer_card())
         layout.addWidget(self._build_playback_card())
+        layout.addWidget(self._build_save_report_card())
 
     def _build_selection_card(self) -> QFrame:
         card = _card()
@@ -344,6 +386,63 @@ class LocalDicomAnalysisPage(QWidget):
         self._set_playback_enabled(False)
         return card
 
+    def _build_save_report_card(self) -> QFrame:
+        card = _card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+
+        header = QLabel("SAVE & REPORT")
+        header.setProperty("role", "sectionHeader")
+        v.addWidget(header)
+
+        hint = QLabel(
+            "Analyzing the full series aggregates stenosis detections across every frame into one "
+            "authoritative reading per lesion (not a single noisy frame) and saves the result into "
+            "this case's analysis_results/ folder, alongside a per-view explainable report."
+        )
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        row1 = QHBoxLayout()
+        self.btn_save_view = QPushButton("Save Results && Generate View Report")
+        self.btn_save_view.setProperty("variant", "primary")
+        self.btn_save_view.clicked.connect(self._save_view_results)
+        row1.addWidget(self.btn_save_view)
+
+        self.btn_open_view_report = QPushButton("Open View Report")
+        self.btn_open_view_report.setVisible(False)
+        self.btn_open_view_report.clicked.connect(self._open_view_report)
+        row1.addWidget(self.btn_open_view_report)
+        row1.addStretch()
+        v.addLayout(row1)
+
+        self.lbl_save_status = QLabel("Load a series and models, then save results to build this view's report.")
+        self.lbl_save_status.setProperty("role", "hint")
+        self.lbl_save_status.setWordWrap(True)
+        v.addWidget(self.lbl_save_status)
+
+        row2 = QHBoxLayout()
+        self.btn_final_report = QPushButton("Generate Final Clinical Report")
+        self.btn_final_report.setEnabled(False)
+        self.btn_final_report.clicked.connect(self._generate_final_report)
+        row2.addWidget(self.btn_final_report)
+
+        self.btn_open_final_report = QPushButton("Open Final Report")
+        self.btn_open_final_report.setVisible(False)
+        self.btn_open_final_report.clicked.connect(self._open_final_report)
+        row2.addWidget(self.btn_open_final_report)
+        row2.addStretch()
+        v.addLayout(row2)
+
+        self.lbl_final_status = QLabel("No views saved yet for this case.")
+        self.lbl_final_status.setProperty("role", "hint")
+        self.lbl_final_status.setWordWrap(True)
+        v.addWidget(self.lbl_final_status)
+
+        return card
+
     # ── Case / series selection ─────────────────────────────────────
     def refresh_cases(self):
         self._cases = patient_store.list_cases()
@@ -362,6 +461,7 @@ class LocalDicomAnalysisPage(QWidget):
                 "No patient cases yet. Click \"+ New Patient\" to create one (with its DICOM data attached), "
                 "then come back here."
             )
+            self._refresh_final_report_status()
 
     def _on_case_selected(self, index: int):
         self.list_series.clear()
@@ -371,6 +471,7 @@ class LocalDicomAnalysisPage(QWidget):
 
         case_id = self._cases[index]["case_id"]
         dicom_dir = patient_store.get_case_dicom_dir(case_id)
+        self._refresh_final_report_status()
         if not dicom_dir.exists():
             self.lbl_series_status.setText(f"No dicom/ folder found for case {case_id}.")
             return
@@ -541,6 +642,139 @@ class LocalDicomAnalysisPage(QWidget):
         t = value / 100.0
         self.analysis_thread.threshold = t
         self.lbl_threshold_val.setText(f"{t:.2f}")
+
+    # ── Save & Report ────────────────────────────────────────────────
+    def _current_case(self):
+        row = self.combo_case.currentIndex()
+        if row < 0 or row >= len(self._cases):
+            return None
+        return self._cases[row]
+
+    def _save_view_results(self):
+        if self._view_analysis_thread is not None and self._view_analysis_thread.isRunning():
+            return
+        if not self._series_frames:
+            self.lbl_save_status.setText("Load a series first.")
+            return
+        if self.analysis_thread.seg_model is None:
+            self.lbl_save_status.setText("Load AI models first.")
+            return
+        case = self._current_case()
+        if case is None:
+            self.lbl_save_status.setText("Select a patient case first.")
+            return
+
+        row = self.list_series.currentRow()
+        default_label = self._series[row].description if 0 <= row < len(self._series) else "View"
+
+        label, ok = QInputDialog.getText(
+            self, "View Label", "Label for this angiographic view (e.g. RAO 30 / CRA 20):",
+            text=default_label,
+        )
+        if not ok:
+            return
+        label = label.strip() or default_label
+
+        self._pending_case_id = case["case_id"]
+        self.btn_open_view_report.setVisible(False)
+        self._set_save_busy(True)
+        self.lbl_save_status.setText(f"Analyzing full series for '{label}'...")
+
+        self._view_analysis_thread = _ViewAnalysisThread(
+            list(self._series_frames), label,
+            self.analysis_thread.seg_model, self.analysis_thread.loc_model,
+            self.analysis_thread.qca_cfg, self.analysis_thread.threshold,
+        )
+        self._view_analysis_thread.progress.connect(self.lbl_save_status.setText)
+        self._view_analysis_thread.finished_ok.connect(self._on_view_analysis_finished)
+        self._view_analysis_thread.error.connect(self._on_view_analysis_error)
+        self._view_analysis_thread.start()
+
+    def _on_view_analysis_finished(self, angle_result):
+        case_id = self._pending_case_id
+        analysis_dir = patient_store.get_case_analysis_dir(case_id)
+        patient_info = patient_store.load_metadata(case_id)
+
+        try:
+            view_dir = analysis_results_store.save_view_results(
+                analysis_dir, angle_result, patient_info, self.analysis_thread.qca_cfg
+            )
+        except Exception as e:
+            self._set_save_busy(False)
+            self.lbl_save_status.setText(f"Failed to save results: {e}")
+            QMessageBox.warning(self, "Save Failed", str(e))
+            return
+
+        self._set_save_busy(False)
+        self._last_view_report = view_dir / "view_report.pdf"
+        n_lesions = len(angle_result.tracks)
+        self.lbl_save_status.setText(
+            f"Saved: {n_lesions} lesion(s) found across {angle_result.n_frames_analyzed} frames. "
+            f"Results + view report saved to {view_dir}"
+        )
+        self.btn_open_view_report.setVisible(True)
+        self._refresh_final_report_status()
+
+    def _on_view_analysis_error(self, message: str):
+        self._set_save_busy(False)
+        self.lbl_save_status.setText(f"Analysis failed: {message}")
+        QMessageBox.warning(self, "Analysis Failed", message)
+
+    def _set_save_busy(self, busy: bool):
+        self.btn_save_view.setEnabled(not busy)
+
+    def _open_view_report(self):
+        if self._last_view_report and hasattr(os, "startfile"):
+            try:
+                os.startfile(self._last_view_report)
+            except OSError:
+                pass
+
+    def _refresh_final_report_status(self):
+        case = self._current_case()
+        if case is None:
+            self.btn_final_report.setEnabled(False)
+            self.lbl_final_status.setText("Select a patient case first.")
+            return
+
+        analysis_dir = patient_store.get_case_analysis_dir(case["case_id"])
+        views = analysis_results_store.list_view_results(analysis_dir)
+        self.btn_final_report.setEnabled(len(views) > 0)
+        self.btn_open_final_report.setVisible(False)
+        if views:
+            names = ", ".join(v["view_label"] for v in views)
+            self.lbl_final_status.setText(f"{len(views)} view(s) saved for this case: {names}")
+        else:
+            self.lbl_final_status.setText("No views saved yet for this case.")
+
+    def _generate_final_report(self):
+        case = self._current_case()
+        if case is None:
+            return
+        case_id = case["case_id"]
+        case_dir = patient_store.get_case_dir(case_id)
+        analysis_dir = patient_store.get_case_analysis_dir(case_id)
+        patient_info = patient_store.load_metadata(case_id)
+
+        try:
+            out_path = analysis_results_store.generate_final_clinical_report(
+                case_dir, analysis_dir, patient_info, self.analysis_thread.qca_cfg
+            )
+        except Exception as e:
+            self.lbl_final_status.setText(f"Failed to generate final report: {e}")
+            QMessageBox.warning(self, "Report Generation Failed", str(e))
+            return
+
+        self._last_final_report = out_path
+        self.lbl_final_status.setText(f"Final clinical diagnosis report saved to {out_path}")
+        self.btn_open_final_report.setVisible(True)
+
+    def _open_final_report(self):
+        if self._last_final_report and hasattr(os, "startfile"):
+            try:
+                os.startfile(self._last_final_report)
+            except OSError:
+                pass
 
     # ── Cleanup ──────────────────────────────────────────────────────
     def shutdown(self):

@@ -225,6 +225,116 @@ def extract_graph(mask: np.ndarray):
     return clean, skel, dt, branches
 
 
+def write_branch_geometry(path: Path, branches: list[dict]):
+    payload = []
+    for branch in branches:
+        coords = np.asarray(branch["centerline_yx"], dtype=np.float64)
+        if len(coords) == 0:
+            continue
+        payload.append(
+            {
+                "branch_id": int(branch["branch_id"]),
+                "points": int(branch["points"]),
+                "length_px": float(branch["length_px"]),
+                "mean_diameter_px": float(branch["mean_diameter_px"]),
+                "start_yx": [float(v) for v in coords[0]],
+                "end_yx": [float(v) for v in coords[-1]],
+                "mean_yx": [float(v) for v in np.mean(coords, axis=0)],
+                "min_yx": [float(v) for v in np.min(coords, axis=0)],
+                "max_yx": [float(v) for v in np.max(coords, axis=0)],
+            }
+        )
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"branches": payload}, f, indent=2)
+
+
+def write_vessel_graph(path: Path, skeleton: np.ndarray, branches: list[dict]):
+    adj = adjacency(skeleton)
+    node_lookup = {}
+    nodes = []
+    for point, neighbors in adj.items():
+        degree = len(neighbors)
+        if degree != 2:
+            node_id = len(nodes)
+            node_lookup[point] = node_id
+            kind = "endpoint" if degree <= 1 else "bifurcation"
+            nodes.append(
+                {
+                    "node_id": node_id,
+                    "kind": kind,
+                    "yx": [int(point[0]), int(point[1])],
+                    "degree": int(degree),
+                }
+            )
+
+    def nearest_node_id(point):
+        if point in node_lookup:
+            return node_lookup[point]
+        if not nodes:
+            return None
+        py, px = point
+        distances = [
+            (node["yx"][0] - py) ** 2 + (node["yx"][1] - px) ** 2
+            for node in nodes
+        ]
+        return int(np.argmin(distances))
+
+    root_node = None
+    bifurcations = [node for node in nodes if node["kind"] == "bifurcation"]
+    if bifurcations:
+        root_node = min(bifurcations, key=lambda node: (node["yx"][1], node["yx"][0]))["node_id"]
+    elif nodes:
+        root_node = min(nodes, key=lambda node: (node["yx"][1], node["yx"][0]))["node_id"]
+
+    graph_branches = []
+    for branch in branches:
+        branch_path = [tuple(point) for point in branch["centerline_yx"]]
+        start_node = nearest_node_id(branch_path[0]) if branch_path else None
+        end_node = nearest_node_id(branch_path[-1]) if branch_path else None
+        connected_bifurcation = None
+        for node_id in (start_node, end_node):
+            if node_id is not None and nodes[node_id]["kind"] == "bifurcation":
+                connected_bifurcation = node_id
+                break
+        graph_branches.append(
+            {
+                "branch_id": int(branch["branch_id"]),
+                "start_node": start_node,
+                "end_node": end_node,
+                "connected_bifurcation": connected_bifurcation,
+                "parent_branch_id": None,
+                "child_branch_ids": [],
+                "generation_level": 0 if connected_bifurcation == root_node else None,
+                "points": int(branch["points"]),
+                "length_px": float(branch["length_px"]),
+                "mean_diameter_px": float(branch["mean_diameter_px"]),
+            }
+        )
+
+    by_node = {}
+    for branch in graph_branches:
+        for node_id in (branch["start_node"], branch["end_node"]):
+            if node_id is not None:
+                by_node.setdefault(node_id, []).append(branch["branch_id"])
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "root_node": root_node,
+                "nodes": nodes,
+                "branches": graph_branches,
+                "node_to_branch_ids": {str(k): v for k, v in by_node.items()},
+                "meaning": {
+                    "endpoint": "skeleton node with one or zero neighbors",
+                    "bifurcation": "skeleton node with three or more neighbors",
+                    "generation_level": "initial placeholder for anatomy-aware matching; refined by landmark detection",
+                },
+            },
+            f,
+            indent=2,
+        )
+
+
 def rotation_from_angles(primary_deg, secondary_deg):
     primary = math.radians(primary_deg)
     secondary = math.radians(secondary_deg)
@@ -395,6 +505,7 @@ def write_obj(path, parts):
     with open(path.with_suffix(".mtl"), "w", encoding="utf-8") as f:
         f.write("newmtl reliable\nKd 0.78 0.78 0.78\n")
         f.write("newmtl usable\nKd 0.45 0.65 1.0\n")
+        f.write("newmtl uncertain\nKd 1.0 0.86 0.15\n")
         f.write("newmtl single_view_preserved\nKd 1.0 0.58 0.12\n")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"mtllib {path.with_suffix('.mtl').name}\n")
@@ -507,6 +618,10 @@ def main():
 
     clean_a, skel_a, dt_a, branches_a = extract_graph(mask_a)
     clean_b, skel_b, dt_b, branches_b = extract_graph(mask_b)
+    write_branch_geometry(out / "view_a_branches.json", branches_a)
+    write_branch_geometry(out / "view_b_branches.json", branches_b)
+    write_vessel_graph(out / "view_a_vessel_graph.json", skel_a, branches_a)
+    write_vessel_graph(out / "view_b_vessel_graph.json", skel_b, branches_b)
     cv2.imwrite(str(out / "view_a_clean_mask.png"), clean_a)
     cv2.imwrite(str(out / "view_b_clean_mask.png"), clean_b)
     cv2.imwrite(str(out / "view_a_skeleton.png"), skel_a)

@@ -1,0 +1,191 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Weak coronary anatomy prior for branch labeling, matching, graph connectivity, taper checks, and reconstruction validation. This is not a patient-specific vessel model.",
+  "safety_rules": [
+    "Do not create a confident vessel branch from the template alone.",
+    "Only reconstruct branches supported by DICOM segmentation or validated branch correspondence.",
+    "Use expected branches as low-confidence guidance when patient evidence is incomplete.",
+    "Patient DICOM evidence and reprojection validation override template assumptions."
+  ],
+  "artery_trees": {
+    "LCA": {
+      "root": "LM",
+      "description": "Left coronary artery template based on common LM bifurcation into LAD and LCX.",
+      "branches": {
+        "LM": {
+          "display_name": "left main",
+          "syntax_segment_ids": [5],
+          "parent": null,
+          "children": ["LAD_prox", "LCX_prox"],
+          "relative_diameter": 1.0,
+          "expected_role": "root",
+          "required_for_tree": true
+        },
+        "LAD_prox": {
+          "display_name": "proximal LAD",
+          "syntax_segment_ids": [6],
+          "parent": "LM",
+          "children": ["LAD_mid", "D1"],
+          "relative_diameter": 0.82,
+          "expected_role": "continuation",
+          "required_for_tree": true
+        },
+        "LAD_mid": {
+          "display_name": "mid LAD",
+          "syntax_segment_ids": [7],
+          "parent": "LAD_prox",
+          "children": ["LAD_distal", "D2"],
+          "relative_diameter": 0.68,
+          "expected_role": "continuation",
+          "required_for_tree": false
+        },
+        "LAD_distal": {
+          "display_name": "distal LAD",
+          "syntax_segment_ids": [8],
+          "parent": "LAD_mid",
+          "children": [],
+          "relative_diameter": 0.48,
+          "expected_role": "distal_continuation",
+          "required_for_tree": false
+        },
+        "D1": {
+          "display_name": "first diagonal",
+          "syntax_segment_ids": [9, 10],
+          "parent": "LAD_prox",
+          "children": [],
+          "relative_diameter": 0.36,
+          "expected_role": "side_branch",
+          "required_for_tree": false
+        },
+        "D2": {
+          "display_name": "second diagonal",
+          "syntax_segment_ids": [11, 12],
+          "parent": "LAD_mid",
+          "children": [],
+          "relative_diameter": 0.30,
+          "expected_role": "side_branch",
+          "required_for_tree": false
+        },
+        "LCX_prox": {
+          "display_name": "proximal LCX",
+          "syntax_segment_ids": [13],
+          "parent": "LM",
+          "children": ["OM1", "LCX_distal"],
+          "relative_diameter": 0.76,
+          "expected_role": "continuation",
+          "required_for_tree": true
+        },
+        "OM1": {
+          "display_name": "obtuse marginal/intermediate branch",
+          "syntax_segment_ids": [14, 15, 24],
+          "parent": "LCX_prox",
+          "children": [],
+          "relative_diameter": 0.38,
+          "expected_role": "side_branch",
+          "required_for_tree": false
+        },
+        "LCX_distal": {
+          "display_name": "distal LCX",
+          "syntax_segment_ids": [16],
+          "parent": "LCX_prox",
+          "children": ["OM2", "LPL"],
+          "relative_diameter": 0.52,
+          "expected_role": "distal_continuation",
+          "required_for_tree": false
+        },
+        "OM2": {
+          "display_name": "second obtuse marginal",
+          "syntax_segment_ids": [15, 24],
+          "parent": "LCX_distal",
+          "children": [],
+          "relative_diameter": 0.30,
+          "expected_role": "side_branch",
+          "required_for_tree": false
+        },
+        "LPL": {
+          "display_name": "left posterolateral branch",
+          "syntax_segment_ids": [17, 18, 25],
+          "parent": "LCX_distal",
+          "children": [],
+          "relative_diameter": 0.26,
+          "expected_role": "terminal_branch",
+          "required_for_tree": false
+        },
+        "LPDA": {
+          "display_name": "left posterior descending artery",
+          "syntax_segment_ids": [19],
+          "parent": "LCX_distal",
+          "children": [],
+          "relative_diameter": 0.26,
+          "expected_role": "dominance_variant",
+          "required_for_tree": false
+        }
+      }
+    },
+    "RCA": {
+      "root": "RCA_prox",
+      "description": "Right coronary artery template with distal PDA/PL branches.",
+      "branches": {
+        "RCA_prox": {
+          "display_name": "proximal RCA",
+          "syntax_segment_ids": [1],
+          "parent": null,
+          "children": ["RCA_mid"],
+          "relative_diameter": 1.0,
+          "expected_role": "root",
+          "required_for_tree": true
+        },
+        "RCA_mid": {
+          "display_name": "mid RCA",
+          "syntax_segment_ids": [2],
+          "parent": "RCA_prox",
+          "children": ["RCA_distal"],
+          "relative_diameter": 0.82,
+          "expected_role": "continuation",
+          "required_for_tree": true
+        },
+        "RCA_distal": {
+          "display_name": "distal RCA",
+          "syntax_segment_ids": [3],
+          "parent": "RCA_mid",
+          "children": ["PDA", "RPL"],
+          "relative_diameter": 0.64,
+          "expected_role": "distal_continuation",
+          "required_for_tree": false
+        },
+        "PDA": {
+          "display_name": "posterior descending artery",
+          "syntax_segment_ids": [4],
+          "parent": "RCA_distal",
+          "children": [],
+          "relative_diameter": 0.36,
+          "expected_role": "terminal_branch",
+          "required_for_tree": false
+        },
+        "RPL": {
+          "display_name": "right posterolateral branch",
+          "syntax_segment_ids": [20, 21, 22, 23],
+          "parent": "RCA_distal",
+          "children": [],
+          "relative_diameter": 0.34,
+          "expected_role": "terminal_branch",
+          "required_for_tree": false
+        }
+      }
+    }
+  },
+  "matching_penalties": {
+    "different_major_artery": 100.0,
+    "different_template_branch": 35.0,
+    "parent_child_inconsistent": 20.0,
+    "diameter_ratio_outside_expected": 12.0,
+    "unknown_label": 5.0
+  },
+  "geometry_constraints": {
+    "max_child_to_parent_diameter_ratio": 0.95,
+    "min_branch_confidence_for_template_label": 0.45,
+    "depth_smoothness_weight": 1.0,
+    "junction_connection_weight": 1.0,
+    "reprojection_weight": 3.0
+  }
+}

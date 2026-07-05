@@ -302,7 +302,7 @@ def validate_view(
     supported_ids = {
         int(row["branch_id"])
         for row in rows
-        if row["branch_status"] in {"reliable", "usable"}
+        if row["branch_status"] in {"reliable", "usable", "uncertain"}
     }
 
     draw_overlay(original, mask, projected_by_branch, rows, output_dir / f"{view_key}_reprojection_validation.png")
@@ -373,7 +373,7 @@ def write_markdown(path: Path, summary: Dict[str, object], csv_name: str):
             "- Yellow centerline: needs review.",
             "- Red centerline: bad reprojection.",
             "- Passing-only overlays hide bad outlier branches.",
-            "- Two-view-supported overlays show only branches accepted as reliable/usable by the 3D matching stage.",
+            "- Two-view-supported overlays show reliable/usable branches plus uncertain candidate matches marked for review.",
             "",
             "A clinically accurate 3D reconstruction should have low reprojection error in both views, especially around bifurcations and stenosis regions.",
         ]

@@ -25,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+from coronary_anatomy_prior import CoronaryAnatomyPrior, DEFAULT_TEMPLATE_PATH, copy_template_snapshot
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,6 +66,10 @@ def copy_final_artifacts(final_dir: Path, validation_dir: Path, output_dir: Path
         "view_b_mask.png",
         "view_a_skeleton.png",
         "view_b_skeleton.png",
+        "view_a_branches.json",
+        "view_b_branches.json",
+        "view_a_vessel_graph.json",
+        "view_b_vessel_graph.json",
     ):
         source = final_dir / name
         if source.exists():
@@ -84,6 +90,48 @@ def copy_final_artifacts(final_dir: Path, validation_dir: Path, output_dir: Path
             shutil.copyfile(source, output_dir / f"final_{name}")
 
 
+def copy_anatomy_artifacts(anatomy_dir: Path, output_dir: Path):
+    for name in ("anatomy_branch_labels.csv", "anatomy_branch_labels.json"):
+        source = anatomy_dir / name
+        if source.exists():
+            shutil.copyfile(source, output_dir / name)
+
+
+def copy_epipolar_anatomy_artifacts(epipolar_dir: Path, output_dir: Path):
+    for name in (
+        "anatomy_anchor_candidates.json",
+        "ostium_candidates_view_a.json",
+        "ostium_candidates_view_b.json",
+        "lm_trace_view_a.json",
+        "lm_trace_view_b.json",
+        "lm_bifurcation_candidates_view_a.json",
+        "lm_bifurcation_candidates_view_b.json",
+        "main_vessel_matches.json",
+        "anatomy_aware_match_report.csv",
+        "bifurcation_detection_overlay_view_a.png",
+        "bifurcation_detection_overlay_view_b.png",
+        "view_a_epipolar_reprojection.png",
+        "view_b_epipolar_reprojection.png",
+    ):
+        source = epipolar_dir / name
+        if source.exists():
+            shutil.copyfile(source, output_dir / name)
+
+
+def copy_selection_artifacts(selection_dir: Path, output_dir: Path):
+    for name in (
+        "auto_selection_report.json",
+        "clip_classification_report.csv",
+        "frame_candidates.csv",
+        "frame_pair_candidates.csv",
+        "view_pair_rankings.csv",
+        "top_frame_candidates.png",
+    ):
+        source = selection_dir / name
+        if source.exists():
+            shutil.copyfile(source, output_dir / name)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dicom-dir", type=Path, required=True, help="Input DICOM folder containing XA clips.")
@@ -97,16 +145,25 @@ def main():
     parser.add_argument("--view-b-index", type=int, help="Optional override for selected view B clip.")
     parser.add_argument("--frame-b", type=int, help="Optional override for selected view B frame.")
     parser.add_argument("--skip-auto-selection", action="store_true", help="Require manual view/frame overrides and skip selector.")
+    parser.add_argument(
+        "--anatomy-template",
+        type=Path,
+        default=DEFAULT_TEMPLATE_PATH,
+        help="Weak coronary anatomy prior JSON to snapshot with the reconstruction output.",
+    )
     args = parser.parse_args()
 
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
+    anatomy_prior = CoronaryAnatomyPrior.load(args.anatomy_template)
+    anatomy_template_snapshot = copy_template_snapshot(out, args.anatomy_template)
 
     selection_dir = out / "01_auto_selection"
     pipeline_dir = out / "02_pipeline"
     epipolar_dir = out / "03_epipolar"
     final_dir = out / "04_smoothed_confidence"
     validation_dir = out / "05_final_validation"
+    anatomy_dir = out / "06_anatomy_labels"
 
     started = datetime.now().isoformat(timespec="seconds")
     selected_pair: Dict[str, object]
@@ -232,7 +289,29 @@ def main():
         ROOT,
     )
 
+    run_step(
+        "Assign Coronary Anatomy Labels",
+        [
+            sys.executable,
+            "scripts/assign_coronary_anatomy_labels.py",
+            "--pipeline-dir",
+            str(pipeline_dir),
+            "--branch-report",
+            str(final_dir / "branch_quality_report.csv"),
+            "--validation-report",
+            str(validation_dir / "reprojection_validation_report.csv"),
+            "--output-dir",
+            str(anatomy_dir),
+            "--template",
+            str(args.anatomy_template),
+        ],
+        ROOT,
+    )
+
     copy_final_artifacts(final_dir, validation_dir, out)
+    copy_anatomy_artifacts(anatomy_dir, out)
+    copy_epipolar_anatomy_artifacts(epipolar_dir, out)
+    copy_selection_artifacts(selection_dir, out)
 
     final_summary = {
         "started": started,
@@ -246,11 +325,38 @@ def main():
             "epipolar": str(epipolar_dir),
             "smoothed_confidence": str(final_dir),
             "final_validation": str(validation_dir),
+            "anatomy_labels": str(anatomy_dir),
+        },
+        "anatomy_prior": {
+            "template": str(anatomy_template_snapshot),
+            "summary": anatomy_prior.summary(),
+            "usage": (
+                "weak prior metadata only in this run; patient DICOM segmentation and "
+                "reprojection validation remain the source of truth"
+            ),
         },
         "final_outputs": {
             "obj": str(out / "hybrid_smoothed_confidence_colored.obj"),
             "branch_report": str(out / "branch_quality_report.csv"),
             "summary": str(out / "smoothed_confidence_summary.json"),
+            "anatomy_template": str(out / "coronary_template_used.json"),
+            "anatomy_branch_labels_csv": str(out / "anatomy_branch_labels.csv"),
+            "anatomy_branch_labels_json": str(out / "anatomy_branch_labels.json"),
+            "clip_classification_report": str(out / "clip_classification_report.csv"),
+            "frame_pair_candidates": str(out / "frame_pair_candidates.csv"),
+            "view_a_vessel_graph": str(out / "view_a_vessel_graph.json"),
+            "view_b_vessel_graph": str(out / "view_b_vessel_graph.json"),
+            "anatomy_anchor_candidates": str(out / "anatomy_anchor_candidates.json"),
+            "view_a_ostium_candidates": str(out / "ostium_candidates_view_a.json"),
+            "view_b_ostium_candidates": str(out / "ostium_candidates_view_b.json"),
+            "view_a_lm_trace": str(out / "lm_trace_view_a.json"),
+            "view_b_lm_trace": str(out / "lm_trace_view_b.json"),
+            "view_a_lm_bifurcation_candidates": str(out / "lm_bifurcation_candidates_view_a.json"),
+            "view_b_lm_bifurcation_candidates": str(out / "lm_bifurcation_candidates_view_b.json"),
+            "main_vessel_matches": str(out / "main_vessel_matches.json"),
+            "anatomy_aware_match_report": str(out / "anatomy_aware_match_report.csv"),
+            "view_a_bifurcation_overlay": str(out / "bifurcation_detection_overlay_view_a.png"),
+            "view_b_bifurcation_overlay": str(out / "bifurcation_detection_overlay_view_b.png"),
             "validation_report": str(out / "final_reprojection_validation_report.md"),
             "view_a_validation_overlay": str(out / "final_view_a_reprojection_validation.png"),
             "view_b_validation_overlay": str(out / "final_view_b_reprojection_validation.png"),

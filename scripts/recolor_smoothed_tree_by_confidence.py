@@ -6,6 +6,7 @@ branch materials according to epipolar_branch_match_report.csv:
 
 - reliable: two-view validated
 - usable: two-view supported
+- uncertain: possible two-view match, requires anatomy review
 - estimated: not accepted by epipolar validation, visual estimate only
 
 Example:
@@ -28,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MATERIALS = {
     "reliable": (0.82, 0.82, 0.82),
     "usable": (0.18, 0.42, 1.0),
+    "uncertain": (1.0, 0.86, 0.15),
     "estimated": (1.0, 0.58, 0.06),
     "junction": (0.72, 0.72, 0.72),
 }
@@ -39,7 +41,7 @@ def load_confidence(report_path: Path) -> Dict[int, str]:
         for row in csv.DictReader(f):
             branch_id = int(row["branch_id"])
             status = row.get("status", "rejected")
-            confidence[branch_id] = status if status in {"reliable", "usable"} else "estimated"
+            confidence[branch_id] = status if status in {"reliable", "usable", "uncertain"} else "estimated"
     return confidence
 
 
@@ -108,7 +110,13 @@ def write_branch_report(path: Path, confidence: Dict[int, str], source_report: P
                 "ref_radius_mm_p80": source.get("ref_radius_mm_p80", ""),
                 "median_residual_mm": source.get("median_residual_mm", ""),
                 "p90_residual_mm": source.get("p90_residual_mm", ""),
-                "confidence_source": "epipolar_two_view" if confidence[branch_id] in {"reliable", "usable"} else "visual_estimate",
+                "confidence_source": (
+                    "epipolar_two_view"
+                    if confidence[branch_id] in {"reliable", "usable"}
+                    else "candidate_two_view_review"
+                    if confidence[branch_id] == "uncertain"
+                    else "visual_estimate"
+                ),
             }
         )
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -128,6 +136,10 @@ def copy_viewer_context(source_dir: Path, output_dir: Path):
         "view_b_mask.png",
         "view_a_skeleton.png",
         "view_b_skeleton.png",
+        "view_a_branches.json",
+        "view_b_branches.json",
+        "view_a_vessel_graph.json",
+        "view_b_vessel_graph.json",
     ):
         source = source_dir / name
         if source.exists():
@@ -164,6 +176,7 @@ def main():
         "meaning": {
             "reliable": "two-view validated branch, visually using smoothed hybrid geometry",
             "usable": "two-view supported branch, visually using smoothed hybrid geometry",
+            "uncertain": "possible two-view branch, shown for review but not a clinical anchor",
             "estimated": "full-tree visual branch, not accepted by epipolar validation",
         },
     }

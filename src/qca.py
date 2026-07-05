@@ -34,20 +34,52 @@ class QCAConfig:
     ref_win_dist: int = 40                   # points after lesion for RVD estimate
     min_lesion_points: int = 3               # minimum centerline span to count as a lesion
 
-    # Severity thresholds per ACC/AHA/ESC standard and QCA consensus (QCA_CAL.md):
-    #   Normal/Minimal : DS  < 30%
-    #   Mild           : 30% ≤ DS < 50%  — non-obstructive, no intervention
-    #   Moderate       : 50% ≤ DS < 70%  — functionally significant with symptoms
-    #   Severe         : DS ≥ 70%        — intervention indicated regardless of symptoms
+    # Severity thresholds — four-tier scheme per the JACIT/ARC-2 hierarchical
+    # consensus (QCA_CAL.md): repeat revascularization is clinically indicated
+    # for (1) DS > 50% WITH recurrent symptoms or a positive functional test,
+    # or (2) DS > 70% regardless of other criteria. Below 50% the split at 30%
+    # is a non-obstructive/mild-vs-moderate convenience boundary (QCA_CAL.md is
+    # silent below 50%; ACC/AHA/ESC practice commonly uses 30% here):
+    #   Mild        : DS  < 30%  — non-obstructive
+    #   Moderate    : 30% ≤ DS < 50%  — watch, not independently actionable
+    #   Significant : 50% ≤ DS < 70%  — actionable if symptomatic / positive functional test
+    #   Severe      : DS ≥ 70%        — intervention indicated regardless of symptoms
     severe_threshold: float = 70.0
-    moderate_threshold: float = 50.0
+    significant_threshold: float = 50.0
+    moderate_threshold: float = 30.0
 
     min_branch_len: int = 15                 # minimum branch length (skeleton px) to analyze
 
     px_to_mm: Optional[float] = None         # set if you have calibration (mm per pixel)
+    # JACIT-recommended calibration range for the standard catheter/isocenter
+    # technique (QCA_CAL.md); used to sanity-check a supplied px_to_mm.
+    px_to_mm_min: float = 0.18
+    px_to_mm_max: float = 0.22
 
     total_occlusion_px_threshold: float = 0.5  # DT at original branch pt below which total occlusion declared
-    stent_mode: bool = False                    # use stent-specific reference window selection
+    stent_mode: bool = False                    # use stent-specific (5mm edge subsegment) reference windows
+    stent_edge_mm: float = 5.0                  # DES analysis: proximal/distal edge subsegment length
+
+    huo_kassab_exponent: float = 7.0 / 3.0      # Huo-Kassab (Murray's law) bifurcation exponent
+
+
+def validate_calibration(cfg: QCAConfig) -> Optional[float]:
+    """
+    Validate cfg.px_to_mm is within the JACIT-recommended range (0.18-0.22
+    mm/px for the standard catheter/isocenter technique). Returns the
+    validated value (or None if no calibration is set). Raises ValueError if
+    a calibration value is set but implausible -- catches a wrong catheter
+    measurement or a copy-paste config error before it silently produces
+    wrong mm measurements.
+    """
+    if cfg.px_to_mm is None:
+        return None
+    if not (cfg.px_to_mm_min <= cfg.px_to_mm <= cfg.px_to_mm_max):
+        raise ValueError(
+            f"px_to_mm={cfg.px_to_mm:.4f} is outside the JACIT-recommended range "
+            f"[{cfg.px_to_mm_min}, {cfg.px_to_mm_max}] mm/pixel."
+        )
+    return cfg.px_to_mm
 
 
 # =========================
@@ -288,7 +320,14 @@ def extract_all_branches(skel: np.ndarray, min_branch_len: int) -> List[List[Tup
                 path.append(nxt)
                 prev, cur = cur, nxt
 
-            if len(path) >= min_branch_len:
+            # Junction-to-junction connectors are always kept even if shorter
+            # than min_branch_len -- dropping them leaves a visual/measurement
+            # gap in the vessel tree right at bifurcation clusters, since a
+            # short connecting segment between two junctions is still part of
+            # the vessel, not a spur to be pruned.
+            start_is_junction = degree.get(start, 0) >= 3
+            end_is_junction = degree.get(cur, 0) >= 3
+            if len(path) >= min_branch_len or (start_is_junction and end_is_junction):
                 branches.append(path)
 
     if not branches:
@@ -613,6 +652,46 @@ def calibrate_from_catheter(mask_catheter: np.ndarray,
     return known_diameter_mm / median_w if median_w > 0 else None
 
 
+def classify_severity(ds_percent: float, cfg: QCAConfig) -> str:
+    """
+    Four-tier JACIT/ARC-2 severity classification (see QCAConfig's threshold
+    doc-comment for the clinical rationale):
+      SEVERE       — DS >= severe_threshold        (unconditional)
+      SIGNIFICANT  — DS >= significant_threshold   (actionable with symptoms / +ve functional test)
+      MODERATE     — DS >= moderate_threshold
+      MILD         — below moderate_threshold
+    """
+    if ds_percent >= cfg.severe_threshold:
+        return "SEVERE"
+    if ds_percent >= cfg.significant_threshold:
+        return "SIGNIFICANT"
+    if ds_percent >= cfg.moderate_threshold:
+        return "MODERATE"
+    return "MILD"
+
+
+def stent_reference_windows(branch: List[Tuple[int, int]], L: int, R: int,
+                            cfg: QCAConfig) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """
+    DES (drug-eluting stent) analysis mode: use fixed edge subsegments
+    (cfg.stent_edge_mm, default 5mm) on the proximal and distal ends of the
+    stented/lesion range to define the reference diameter, per the JACIT
+    standard DES algorithm (QCA_CAL.md), instead of the general tapered-RVD
+    windows. Returns (prox_slice, dist_slice) as (start, end) index pairs.
+    """
+    if cfg.px_to_mm and cfg.px_to_mm > 0:
+        edge_px = int(round(cfg.stent_edge_mm / cfg.px_to_mm))
+    else:
+        edge_px = 25   # fallback ~5mm at the JACIT-standard 0.20 mm/px
+
+    N = len(branch)
+    prox_start = max(0, L - edge_px)
+    prox_end = max(0, L - 1)
+    dist_start = min(N - 1, R + 1)
+    dist_end = min(N - 1, R + edge_px)
+    return (prox_start, prox_end), (dist_start, dist_end)
+
+
 # =========================
 # QCA: diameter profile + lesion metrics (V6-enhanced)
 # =========================
@@ -750,7 +829,22 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
             percent_DS = 100.0
             RVD = local_ref          # use adjacent healthy diameter, not global ref
         else:
-            RVD = _tapered_rvd(d_s, L, R, m, cfg.ref_win_prox, cfg.ref_win_dist)
+            if cfg.stent_mode:
+                # DES mode: JACIT standard uses fixed 5mm proximal/distal edge
+                # subsegments rather than the general tapered-percentile window,
+                # since post-PCI/follow-up reference segments are defined
+                # relative to the stented range, not the whole branch.
+                (pS, pE), (dS, dE) = stent_reference_windows(branch, L, R, cfg)
+                if pE - pS + 1 >= 3 and dE - dS + 1 >= 3:
+                    RVD_prox = float(np.percentile(d_s[pS:pE + 1], 80))
+                    RVD_dist = float(np.percentile(d_s[dS:dE + 1], 80))
+                    span = (R - L) if R > L else 1
+                    t = max(0.0, min(1.0, (m - L) / span))
+                    RVD = (1.0 - t) * RVD_prox + t * RVD_dist
+                else:
+                    RVD = _tapered_rvd(d_s, L, R, m, cfg.ref_win_prox, cfg.ref_win_dist)
+            else:
+                RVD = _tapered_rvd(d_s, L, R, m, cfg.ref_win_prox, cfg.ref_win_dist)
             if RVD <= 1e-6:
                 RVD = local_ref      # fallback to the reference window we already computed
             percent_DS = max(0.0, (1.0 - MLD / RVD) * 100.0)
@@ -761,11 +855,7 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
         RVD_mm = RVD * px if px else None
         length_mm = length_px * px if px else None
 
-        severity = "MILD"
-        if percent_DS >= cfg.severe_threshold:
-            severity = "SEVERE"
-        elif percent_DS >= cfg.moderate_threshold:
-            severity = "MODERATE"
+        severity = classify_severity(percent_DS, cfg)
 
         # Confidence score: edge sharpness (0.5) + ref quality (0.3) + length (0.2)
         edge_sharpness = min(1.0, (local_ref - MLD) / (local_ref + 1e-6))
@@ -814,6 +904,88 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
             merged.append(les)
 
     return merged
+
+
+# =========================
+# Bifurcation analysis (Huo-Kassab / Murray's law step-down check)
+# =========================
+# Standalone and not wired into qca_from_mask's return value on purpose: the
+# rest of the pipeline (frame_pipeline.py, report_engine.py, desktop_app_qca.py,
+# dicom_analysis_thread.py) all unpack qca_from_mask's 3-tuple, and changing
+# that arity would force edits to every caller. Call these directly wherever
+# bifurcation detail is wanted, passing the branches/dt/skel already produced
+# by qca_from_mask.
+def huo_kassab_check(d_mother: float, d_large: float, d_small: float,
+                     exponent: float = 7.0 / 3.0) -> Tuple[float, float]:
+    """
+    Huo-Kassab relation (a generalization of Murray's law) for the diameter
+    step-down at a coronary bifurcation, per QCA_CAL.md's bifurcation-analysis
+    section:
+        D_mother^n = D_large_daughter^n + D_small_daughter^n,   n = 7/3
+
+    Returns (predicted_mother_diameter, relative_error) in the same units as
+    the inputs (px or mm) -- a large relative_error flags either a genuine
+    diseased/atypical bifurcation or a measurement error at that junction.
+    """
+    if d_large <= 0 or d_small <= 0:
+        return float("nan"), float("nan")
+    predicted_mother = (d_large ** exponent + d_small ** exponent) ** (1.0 / exponent)
+    rel_err = abs(predicted_mother - d_mother) / max(d_mother, 1e-9)
+    return predicted_mother, rel_err
+
+
+def analyse_bifurcations(branches: List[List[Tuple[int, int]]],
+                         dt: np.ndarray,
+                         skel: np.ndarray,
+                         cfg: QCAConfig) -> List[dict]:
+    """
+    Finds skeleton junction points, matches them to the branches meeting
+    there, and applies the Huo-Kassab step-down check across each
+    bifurcation (mother vessel vs. the two daughter vessels).
+    Returns a list of bifurcation dicts, one per detected junction with >=3
+    branches meeting there.
+    """
+    junctions = skeleton_junctions(skel)
+    if not junctions:
+        return []
+
+    results = []
+    for jy, jx in junctions:
+        near = []
+        for bi, br in enumerate(branches):
+            for pt in br[:5] + br[-5:]:
+                if abs(pt[0] - jy) <= 3 and abs(pt[1] - jx) <= 3:
+                    sample = br[:10] if pt in br[:5] else br[-10:]
+                    diam_samples = [2.0 * dt[y, x] for y, x in sample if dt[y, x] > 0]
+                    if diam_samples:
+                        near.append((bi, float(np.mean(diam_samples))))
+                    break
+
+        if len(near) < 3:
+            continue  # need a mother branch + 2 daughters
+
+        near_sorted = sorted(near, key=lambda t: t[1], reverse=True)
+        mother_id, d_mother = near_sorted[0]
+        large_id, d_large = near_sorted[1]
+        small_id, d_small = near_sorted[2]
+
+        pred_mother, rel_err = huo_kassab_check(d_mother, d_large, d_small, cfg.huo_kassab_exponent)
+        px = cfg.px_to_mm
+        results.append({
+            "junction_pt": (jy, jx),
+            "mother_branch_id": mother_id,
+            "large_daughter_id": large_id,
+            "small_daughter_id": small_id,
+            "D_mother_px": d_mother,
+            "D_large_px": d_large,
+            "D_small_px": d_small,
+            "D_mother_predicted_px": pred_mother,
+            "huo_kassab_rel_error": rel_err,
+            "D_mother_mm": d_mother * px if px else None,
+            "D_large_mm": d_large * px if px else None,
+            "D_small_mm": d_small * px if px else None,
+        })
+    return results
 
 
 def qca_from_mask(bw_mask: np.ndarray, cfg: QCAConfig,
@@ -880,14 +1052,16 @@ _BRANCH_COLORS = [
 ]
 
 _SEVERITY_BGR = {
-    "SEVERE":   (0,  0,  255),   # Red
-    "MODERATE": (0, 140, 255),   # Orange
-    "MILD":     (0, 215, 255),   # Gold
+    "SEVERE":      (0,  0,  255),   # Red
+    "SIGNIFICANT": (0, 140, 255),   # Orange
+    "MODERATE":    (0, 215, 255),   # Gold
+    "MILD":        (0, 255, 255),   # Yellow
 }
 _SEVERITY_RADIUS = {
-    "SEVERE":   3,
-    "MODERATE": 2,
-    "MILD":     1,
+    "SEVERE":      3,
+    "SIGNIFICANT": 2,
+    "MODERATE":    1,
+    "MILD":        1,
 }
 
 def draw_overlay(angio: np.ndarray, mask: np.ndarray, branches: List[List[Tuple[int,int]]],
@@ -907,14 +1081,16 @@ def draw_overlay(angio: np.ndarray, mask: np.ndarray, branches: List[List[Tuple[
         for (y, x) in branch:
             vis[y, x] = color
 
-    # Only MODERATE (≥50% DS) and SEVERE (≥70% DS) lesions are drawn.
-    # Mild (<50%) lesions are still detected and written to the CSV but are
-    # not shown on the overlay to keep the image clinically actionable.
+    # Only SIGNIFICANT (>=50% DS) and SEVERE (>=70% DS) lesions are drawn --
+    # i.e. the two tiers that are independently clinically actionable per the
+    # ARC-2 hierarchical definition (QCA_CAL.md). MODERATE (30-49%) and MILD
+    # (<30%) are still detected and written to the CSV/report but are not
+    # shown on the overlay, to keep the image clinically actionable.
     # Color coding:
-    #   SEVERE   (≥70%)  = Red    (circles r=3, prominent label)
-    #   MODERATE (50-69%)= Orange (circles r=2)
+    #   SEVERE      (>=70%)   = Red    (circles r=3, prominent label)
+    #   SIGNIFICANT (50-69%)  = Orange (circles r=2)
     display_lesions = [l for l in lesions
-                       if l.get("severity", "MILD") in ("SEVERE", "MODERATE")]
+                       if l.get("severity", "MILD") in ("SEVERE", "SIGNIFICANT")]
     for k, les in enumerate(display_lesions):
         sev = les.get("severity", "MILD")
         color  = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
@@ -1085,6 +1261,7 @@ _CSV_FIELDS_BATCH = [
 def run_qca_batch(angiogram_dir: str, mask_dir: str, out_dir: str,
                   cfg: QCAConfig,
                   angio_exts=(".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")):
+    validate_calibration(cfg)
     angio_dir = Path(angiogram_dir)
     mask_dirp = Path(mask_dir)
     out = Path(out_dir)
@@ -1178,6 +1355,7 @@ _CSV_FIELDS_SINGLE = [
 ]
 
 def run_qca_single(angio_path: str, mask_path: str, out_dir: str, cfg: QCAConfig):
+    validate_calibration(cfg)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 

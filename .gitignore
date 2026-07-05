@@ -229,3 +229,4 @@ plot_*.py
 /checkpoints/**/*.zip
 !/checkpoints/**/*.onnx
 !/checkpoints/**/*.pth
+patient_data/

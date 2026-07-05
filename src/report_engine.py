@@ -270,7 +270,9 @@ def generate_reasoning(track: LesionTrack, cfg: QCAConfig) -> str:
 
     return (
         f"{ds:.1f}% diameter stenosis (MLD {mld:.1f}{unit} vs reference vessel diameter "
-        f"{rvd:.1f}{unit}){loc_sentence} — classified {sev} per ACC/AHA/ESC consensus "
-        f"(Severe ≥{cfg.severe_threshold:.0f}% DS, Moderate ≥{cfg.moderate_threshold:.0f}% DS)."
+        f"{rvd:.1f}{unit}){loc_sentence} — classified {sev} per the JACIT/ARC-2 hierarchical "
+        f"consensus (Severe ≥{cfg.severe_threshold:.0f}% DS regardless of symptoms; "
+        f"Significant ≥{cfg.significant_threshold:.0f}% DS if symptomatic or a positive "
+        f"functional test; Moderate ≥{cfg.moderate_threshold:.0f}% DS)."
         f"{occ_sentence}{conf_sentence}{method_note}{frame_note}"
     )

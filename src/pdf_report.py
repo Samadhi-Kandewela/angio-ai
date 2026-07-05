@@ -21,7 +21,8 @@ from report_engine import AngleResult, FrameRecord, LesionTrack, generate_reason
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
-    "MODERATE": "#FF7F0E",
+    "SIGNIFICANT": "#FF7F0E",
+    "MODERATE": "#DBB40C",
     "MILD": "#BCBD22",
 }
 
@@ -75,7 +76,7 @@ def _draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.n
             continue
         rep = t.representative
         sev = rep["severity"]
-        if sev not in ("SEVERE", "MODERATE"):
+        if sev not in ("SEVERE", "SIGNIFICANT"):
             continue
 
         color = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
@@ -182,7 +183,7 @@ def _add_angle_summary_page(pdf, ar: AngleResult):
 
     shown = sum(
         1 for t in ar.tracks
-        if t.representative["severity"] in ("SEVERE", "MODERATE") and rec.frame_idx in t.frame_indices
+        if t.representative["severity"] in ("SEVERE", "SIGNIFICANT") and rec.frame_idx in t.frame_indices
     )
     caption = (
         f"{shown} of {len(ar.tracks)} detected lesion(s) in this view are co-visible in this frame; "
@@ -194,7 +195,7 @@ def _add_angle_summary_page(pdf, ar: AngleResult):
     ax_legend.set_xlim(0, 1)
     ax_legend.set_ylim(0, 1)
     ax_legend.axis("off")
-    for i, (label, color) in enumerate([("SEVERE (≥70% DS)", "#D62728"), ("MODERATE (50–69% DS)", "#FF7F0E")]):
+    for i, (label, color) in enumerate([("SEVERE (≥70% DS)", "#D62728"), ("SIGNIFICANT (50–69% DS)", "#FF7F0E")]):
         ax_legend.scatter([0.05 + i * 0.4], [0.5], color=color, s=80)
         ax_legend.text(0.09 + i * 0.4, 0.5, label, fontsize=9, va="center")
 
@@ -230,9 +231,10 @@ def _add_methodology_page(pdf, cfg: QCAConfig, any_localization: bool, all_local
         "(QCA) pipeline: deep-learning vessel segmentation, skeleton-based centerline",
         "extraction, per-branch lesion detection, and AHA/SYNTAX anatomical localization.",
         "",
-        f"Severity thresholds follow the ACC/AHA/ESC consensus: Severe ≥{cfg.severe_threshold:.0f}%",
-        f"diameter stenosis (DS), Moderate ≥{cfg.moderate_threshold:.0f}% DS, below that classified",
-        "Mild / non-obstructive.",
+        f"Severity follows the JACIT/ARC-2 hierarchical consensus: Severe ≥{cfg.severe_threshold:.0f}%",
+        f"diameter stenosis (DS) regardless of symptoms; Significant ≥{cfg.significant_threshold:.0f}% DS,",
+        f"actionable if symptomatic or a positive functional test; Moderate ≥{cfg.moderate_threshold:.0f}% DS;",
+        "below that classified Mild / non-obstructive.",
         "",
         "Each lesion's reported measurement is taken from the single video frame where",
         "that lesion's detection confidence (edge sharpness + reference-segment quality +",

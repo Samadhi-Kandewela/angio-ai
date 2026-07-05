@@ -31,6 +31,7 @@ MATERIALS = {
     "usable": (0.18, 0.42, 1.0),
     "uncertain": (1.0, 0.86, 0.15),
     "estimated": (1.0, 0.58, 0.06),
+    "estimated_connector": (0.68, 0.70, 0.72),
     "junction": (0.72, 0.72, 0.72),
 }
 
@@ -74,6 +75,10 @@ def recolor_obj(source_obj: Path, output_obj: Path, confidence: Dict[int, str]):
                 continue
             if line.startswith("o "):
                 name = line[2:].strip()
+                if name.startswith("estimated_connector"):
+                    current_material = "estimated_connector"
+                    dst.write(f"o {name}\n")
+                    continue
                 branch_match = re.search(r"branch[_-](\d+)", name)
                 if branch_match:
                     branch_id = int(branch_match.group(1))

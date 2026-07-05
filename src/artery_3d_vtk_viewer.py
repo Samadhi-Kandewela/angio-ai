@@ -71,6 +71,9 @@ DEFAULT_OBJ = PROJECT_ROOT / "dicom_pipeline_output_v2" / "pipeline_hybrid_qca_t
 MATERIAL_COLORS = {
     "reliable": (0.78, 0.78, 0.78),
     "usable": (0.25, 0.48, 1.0),
+    "uncertain": (1.0, 0.86, 0.15),
+    "estimated": (0.82, 0.82, 0.82),
+    "estimated_connector": (0.68, 0.70, 0.72),
     "single_view_preserved": (1.0, 0.55, 0.08),
     "stenosis_marker": (1.0, 0.02, 0.02),
 }
@@ -221,6 +224,7 @@ class VTKArteryViewer(QMainWindow):
         self.bad_reprojection_branch_ids: set[int] = set()
         self.summary: Dict[str, object] = {}
         self.branch_actors: Dict[int, List[vtk.vtkActor]] = {}
+        self.connector_actors: List[vtk.vtkActor] = []
         self.all_actors: List[vtk.vtkActor] = []
         self.orientation_widget: Optional[vtk.vtkOrientationMarkerWidget] = None
 
@@ -260,6 +264,10 @@ class VTKArteryViewer(QMainWindow):
         self.chk_hide_bad = QCheckBox("Hide Bad Branches")
         self.chk_hide_bad.setToolTip("Hide branches marked red/bad in final reprojection validation.")
         self.chk_hide_bad.stateChanged.connect(self.apply_branch_visibility_filter)
+        self.chk_show_connectors = QCheckBox("Show Connectors")
+        self.chk_show_connectors.setChecked(True)
+        self.chk_show_connectors.setToolTip("Show light-gray estimated connector tubes between likely vessel gaps.")
+        self.chk_show_connectors.stateChanged.connect(self.apply_branch_visibility_filter)
         self.combo_image_orientation = QComboBox()
         self.combo_image_orientation.addItems(
             [
@@ -325,6 +333,7 @@ class VTKArteryViewer(QMainWindow):
         controls.addWidget(self.combo_image_orientation)
         controls.addWidget(self.btn_apply_angle)
         controls.addWidget(self.chk_hide_bad)
+        controls.addWidget(self.chk_show_connectors)
         controls.addStretch(1)
         left_layout.addLayout(controls)
         left_layout.addWidget(self.lbl_path)
@@ -416,6 +425,7 @@ class VTKArteryViewer(QMainWindow):
 
     def load_pipeline_summary(self, obj_path: Path) -> Dict[str, object]:
         candidates = [
+            obj_path.with_name("clinical_reconstruction_report.json"),
             obj_path.with_name("pipeline_summary.json"),
             obj_path.with_name("hybrid_qca_radius_summary.json"),
             obj_path.with_name("filtered_epipolar_summary.json"),
@@ -445,6 +455,44 @@ class VTKArteryViewer(QMainWindow):
         if not self.summary:
             return "No summary JSON found beside this OBJ."
         lines = []
+        grading = self.summary.get("grading")
+        metrics = self.summary.get("metrics")
+        if isinstance(grading, dict):
+            confidence = str(grading.get("overall_confidence", "unknown")).upper()
+            lines.append(f"Clinical confidence: {confidence}")
+            statement = grading.get("clinical_use_statement")
+            if statement:
+                lines.append(str(statement))
+        if isinstance(metrics, dict):
+            lines.append(
+                "Validation: "
+                f"good {metrics.get('good_validation_branches', 0)} | "
+                f"review {metrics.get('review_validation_branches', 0)} | "
+                f"bad {metrics.get('bad_validation_branches', 0)}"
+            )
+            lines.append(
+                "3D confidence: "
+                f"usable {metrics.get('usable_3d_branches', 0)} | "
+                f"uncertain {metrics.get('uncertain_3d_branches', 0)} | "
+                f"estimated {metrics.get('estimated_3d_branches', 0)}"
+            )
+            lines.append(
+                f"Errors: median {metrics.get('max_median_reprojection_error_px', '?')} px | "
+                f"p90 {metrics.get('max_p90_reprojection_error_px', '?')} px"
+            )
+        selected_views = self.summary.get("selected_views")
+        if isinstance(selected_views, dict):
+            for key in ("view_a", "view_b"):
+                view = selected_views.get(key)
+                if isinstance(view, dict):
+                    lines.append(
+                        f"{key}: clip {view.get('clip_index', '?')} frame {view.get('frame', '?')} "
+                        f"P {view.get('primary_angle_deg', '?')} S {view.get('secondary_angle_deg', '?')}"
+                    )
+        if isinstance(grading, dict) and grading.get("warnings"):
+            lines.append("Warnings:")
+            for warning in grading.get("warnings", [])[:3]:
+                lines.append(f"- {warning}")
         if "branch_status_counts" in self.summary:
             counts = self.summary.get("branch_status_counts", {})
             lines.append(
@@ -473,6 +521,18 @@ class VTKArteryViewer(QMainWindow):
             return []
         folder = self.obj_path.parent
         candidates = [
+            ("View A Final Reprojection", folder / "final_view_a_reprojection_validation.png"),
+            ("View B Final Reprojection", folder / "final_view_b_reprojection_validation.png"),
+            ("View A Supported Reprojection", folder / "final_view_a_supported_reprojection_validation.png"),
+            ("View B Supported Reprojection", folder / "final_view_b_supported_reprojection_validation.png"),
+            ("View A Passing Reprojection", folder / "final_view_a_passing_reprojection_validation.png"),
+            ("View B Passing Reprojection", folder / "final_view_b_passing_reprojection_validation.png"),
+            ("View A Reprojection", folder / "view_a_reprojection_validation.png"),
+            ("View B Reprojection", folder / "view_b_reprojection_validation.png"),
+            ("View A Supported Reprojection", folder / "view_a_supported_reprojection_validation.png"),
+            ("View B Supported Reprojection", folder / "view_b_supported_reprojection_validation.png"),
+            ("View A Passing Reprojection", folder / "view_a_passing_reprojection_validation.png"),
+            ("View B Passing Reprojection", folder / "view_b_passing_reprojection_validation.png"),
             ("View A Segmentation", folder / "view_a_overlay.png"),
             ("View B Segmentation", folder / "view_b_overlay.png"),
             ("View C / IM1 Segmentation", folder / "view_c_overlay.png"),
@@ -512,6 +572,7 @@ class VTKArteryViewer(QMainWindow):
             return
         self.renderer.RemoveAllViewProps()
         self.branch_actors = {}
+        self.connector_actors = []
         self.all_actors = []
 
         for part in self.mesh.parts:
@@ -526,9 +587,17 @@ class VTKArteryViewer(QMainWindow):
             actor.GetProperty().SetSpecular(0.28)
             actor.GetProperty().SetSpecularPower(22)
             actor.GetProperty().SetInterpolationToPhong()
+            if part.material == "estimated_connector":
+                actor.GetProperty().SetOpacity(0.38)
+                actor.GetProperty().EdgeVisibilityOn()
+                actor.GetProperty().SetEdgeColor(0.92, 0.94, 0.96)
+                actor.GetProperty().SetLineWidth(1.0)
+                actor.GetProperty().SetSpecular(0.08)
 
             self.renderer.AddActor(actor)
             self.all_actors.append(actor)
+            if part.material == "estimated_connector":
+                self.connector_actors.append(actor)
             branch_id = branch_id_from_name(part.name)
             if branch_id is not None:
                 self.branch_actors.setdefault(branch_id, []).append(actor)
@@ -541,10 +610,13 @@ class VTKArteryViewer(QMainWindow):
     def apply_branch_visibility_filter(self, state=None, render: bool = True):
         hide_bad = self.chk_hide_bad.isChecked() if hasattr(self, "chk_hide_bad") else False
         hidden_ids = self.bad_reprojection_branch_ids if hide_bad else set()
+        show_connectors = self.chk_show_connectors.isChecked() if hasattr(self, "chk_show_connectors") else True
         for branch_id, actors in self.branch_actors.items():
             visible = branch_id not in hidden_ids
             for actor in actors:
                 actor.SetVisibility(1 if visible else 0)
+        for actor in self.connector_actors:
+            actor.SetVisibility(1 if show_connectors else 0)
         if render:
             self.vtk_widget.GetRenderWindow().Render()
 
@@ -726,6 +798,10 @@ class VTKArteryViewer(QMainWindow):
 
     def set_summary_angle_view(self, key: str):
         view = self.summary.get(key) if isinstance(self.summary, dict) else None
+        if not isinstance(view, dict) and isinstance(self.summary, dict):
+            selected_views = self.summary.get("selected_views")
+            if isinstance(selected_views, dict):
+                view = selected_views.get(key)
         if not isinstance(view, dict):
             QMessageBox.information(self, "No DICOM Angle", f"No {key} angle found beside this OBJ.")
             return

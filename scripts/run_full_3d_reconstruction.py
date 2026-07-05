@@ -123,6 +123,8 @@ def copy_selection_artifacts(selection_dir: Path, output_dir: Path):
         "auto_selection_report.json",
         "clip_classification_report.csv",
         "frame_candidates.csv",
+        "selected_frame_candidates.csv",
+        "rejected_frame_report.csv",
         "frame_pair_candidates.csv",
         "view_pair_rankings.csv",
         "top_frame_candidates.png",
@@ -313,6 +315,17 @@ def main():
     copy_epipolar_anatomy_artifacts(epipolar_dir, out)
     copy_selection_artifacts(selection_dir, out)
 
+    run_step(
+        "Clinical Reconstruction Confidence Report",
+        [
+            sys.executable,
+            "scripts/clinical_reconstruction_report.py",
+            "--reconstruction-dir",
+            str(out),
+        ],
+        ROOT,
+    )
+
     final_summary = {
         "started": started,
         "finished": datetime.now().isoformat(timespec="seconds"),
@@ -358,6 +371,8 @@ def main():
             "view_a_bifurcation_overlay": str(out / "bifurcation_detection_overlay_view_a.png"),
             "view_b_bifurcation_overlay": str(out / "bifurcation_detection_overlay_view_b.png"),
             "validation_report": str(out / "final_reprojection_validation_report.md"),
+            "clinical_report": str(out / "clinical_reconstruction_report.md"),
+            "clinical_report_json": str(out / "clinical_reconstruction_report.json"),
             "view_a_validation_overlay": str(out / "final_view_a_reprojection_validation.png"),
             "view_b_validation_overlay": str(out / "final_view_b_reprojection_validation.png"),
             "view_a_passing_validation_overlay": str(out / "final_view_a_passing_reprojection_validation.png"),

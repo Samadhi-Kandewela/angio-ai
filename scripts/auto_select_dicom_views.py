@@ -65,6 +65,17 @@ class FrameCandidate:
     bifurcation_count: int
     shape_descriptor: List[float]
     quality_score: float
+    base_mask_quality_score: float
+    sharpness_score: float
+    contrast_score: float
+    vessel_contrast_score: float
+    continuity_score: float
+    anatomy_visibility_score: float
+    fragmentation_penalty: float
+    exposure_penalty: float
+    clinical_quality_score: float
+    quality_gate: str
+    quality_reason: str
     artery_group: str
     artery_source: str
 
@@ -147,6 +158,109 @@ def score_frame(mask: np.ndarray, branches: List[Dict[str, object]]) -> tuple[fl
     return area_pct, total_length, float(max(0.0, quality))
 
 
+def connected_component_stats(mask: np.ndarray) -> tuple[int, float]:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    if num_labels <= 1:
+        return 0, 0.0
+    areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float64)
+    largest = float(np.max(areas))
+    total = float(np.sum(areas))
+    small_components = int(np.sum(areas < max(20.0, largest * 0.08)))
+    largest_ratio = largest / max(total, 1.0)
+    return small_components, largest_ratio
+
+
+def image_quality_metrics(gray: np.ndarray, mask: np.ndarray, skeleton: np.ndarray, branches: List[Dict[str, object]], base_quality: float) -> Dict[str, object]:
+    vessel = mask > 0
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+
+    lap = cv2.Laplacian(clahe, cv2.CV_64F)
+    if np.count_nonzero(vessel) > 20:
+        sharpness_raw = float(np.var(lap[vessel]))
+    else:
+        sharpness_raw = float(np.var(lap))
+    sharpness_score = 100.0 * min(sharpness_raw / 120.0, 1.0)
+
+    p2, p98 = np.percentile(gray, [2, 98])
+    global_contrast_raw = float(p98 - p2)
+    contrast_score = 100.0 * min(global_contrast_raw / 105.0, 1.0)
+
+    dilated = cv2.dilate((mask > 0).astype(np.uint8), np.ones((11, 11), np.uint8), iterations=1) > 0
+    local_bg = np.logical_and(dilated, ~vessel)
+    if np.count_nonzero(vessel) > 20 and np.count_nonzero(local_bg) > 20:
+        vessel_mean = float(np.mean(clahe[vessel]))
+        bg_mean = float(np.mean(clahe[local_bg]))
+        vessel_contrast_raw = abs(vessel_mean - bg_mean)
+    else:
+        vessel_contrast_raw = 0.0
+    vessel_contrast_score = 100.0 * min(vessel_contrast_raw / 32.0, 1.0)
+
+    skeleton_len = float(np.count_nonzero(skeleton))
+    branch_count = len(branches)
+    continuity_score = 100.0 * min(skeleton_len / max(260.0 + 30.0 * branch_count, 1.0), 1.0)
+    lengths = sorted((float(branch.get("length_px", 0.0)) for branch in branches), reverse=True)
+    longest = lengths[0] if lengths else 0.0
+    second = lengths[1] if len(lengths) > 1 else 0.0
+    area_pct = float(np.count_nonzero(mask) / mask.size * 100.0)
+    anatomy_visibility_score = 100.0 * (
+        0.28 * min(branch_count / 8.0, 1.0)
+        + 0.26 * min(skeleton_len / 950.0, 1.0)
+        + 0.18 * min(area_pct / 4.8, 1.0)
+        + 0.16 * min(longest / 360.0, 1.0)
+        + 0.12 * min(second / 220.0, 1.0)
+    )
+
+    small_components, largest_ratio = connected_component_stats(mask)
+    fragmentation_penalty = min(45.0, 4.0 * small_components + 35.0 * max(0.0, 0.58 - largest_ratio))
+
+    dark_pct = float(np.mean(gray <= 8) * 100.0)
+    bright_pct = float(np.mean(gray >= 247) * 100.0)
+    exposure_penalty = min(45.0, 1.8 * max(0.0, dark_pct - 1.0) + 1.8 * max(0.0, bright_pct - 1.0))
+
+    clinical_quality = (
+        0.22 * base_quality
+        + 0.13 * sharpness_score
+        + 0.11 * contrast_score
+        + 0.15 * vessel_contrast_score
+        + 0.14 * continuity_score
+        + 0.25 * anatomy_visibility_score
+        - fragmentation_penalty
+        - exposure_penalty
+    )
+    clinical_quality = float(max(0.0, min(100.0, clinical_quality)))
+
+    reasons = []
+    if sharpness_score < 22.0:
+        reasons.append("low_sharpness")
+    if vessel_contrast_score < 18.0:
+        reasons.append("weak_vessel_contrast")
+    if continuity_score < 22.0:
+        reasons.append("poor_centerline_continuity")
+    if fragmentation_penalty > 22.0:
+        reasons.append("fragmented_mask")
+    if exposure_penalty > 18.0:
+        reasons.append("exposure_artifact")
+    if base_quality < 18.0:
+        reasons.append("low_vessel_tree_quality")
+    if anatomy_visibility_score < 42.0:
+        reasons.append("weak_anatomy_visibility")
+    if branch_count < 3:
+        reasons.append("too_few_visible_branches")
+    gate = "pass" if clinical_quality >= 34.0 and anatomy_visibility_score >= 38.0 and len(reasons) <= 2 else "review" if clinical_quality >= 22.0 else "reject"
+    return {
+        "sharpness_score": float(sharpness_score),
+        "contrast_score": float(contrast_score),
+        "vessel_contrast_score": float(vessel_contrast_score),
+        "continuity_score": float(continuity_score),
+        "anatomy_visibility_score": float(anatomy_visibility_score),
+        "fragmentation_penalty": float(fragmentation_penalty),
+        "exposure_penalty": float(exposure_penalty),
+        "clinical_quality_score": clinical_quality,
+        "quality_gate": gate,
+        "quality_reason": ";".join(reasons) if reasons else "ok",
+    }
+
+
 def skeleton_counts(skeleton: np.ndarray) -> tuple[int, int]:
     ys, xs = np.where(skeleton > 0)
     points = set(zip(ys.tolist(), xs.tolist()))
@@ -199,6 +313,7 @@ def build_frame_candidates(
             mask, overlay = segment_frame(session, input_name, gray, threshold)
             clean_mask, skeleton, _, branches = extract_graph(mask)
             area_pct, total_length, quality = score_frame(clean_mask, branches)
+            metrics = image_quality_metrics(gray, clean_mask, skeleton, branches, quality)
             endpoints, bifurcations = skeleton_counts(skeleton)
             descriptor = shape_descriptor(area_pct, total_length, branches, endpoints, bifurcations)
             candidates.append(
@@ -216,7 +331,18 @@ def build_frame_candidates(
                     endpoint_count=endpoints,
                     bifurcation_count=bifurcations,
                     shape_descriptor=descriptor,
-                    quality_score=quality,
+                    quality_score=metrics["clinical_quality_score"],
+                    base_mask_quality_score=quality,
+                    sharpness_score=metrics["sharpness_score"],
+                    contrast_score=metrics["contrast_score"],
+                    vessel_contrast_score=metrics["vessel_contrast_score"],
+                    continuity_score=metrics["continuity_score"],
+                    anatomy_visibility_score=metrics["anatomy_visibility_score"],
+                    fragmentation_penalty=metrics["fragmentation_penalty"],
+                    exposure_penalty=metrics["exposure_penalty"],
+                    clinical_quality_score=metrics["clinical_quality_score"],
+                    quality_gate=metrics["quality_gate"],
+                    quality_reason=metrics["quality_reason"],
                     artery_group=artery["artery_group"],
                     artery_source=artery["artery_source"],
                 )
@@ -230,7 +356,10 @@ def keep_best_frames_per_clip(candidates: List[FrameCandidate], top_k: int) -> L
         by_clip.setdefault(candidate.clip.index, []).append(candidate)
     kept = []
     for frames in by_clip.values():
-        kept.extend(sorted(frames, key=lambda item: item.quality_score, reverse=True)[:top_k])
+        pass_frames = [frame for frame in frames if frame.quality_gate == "pass"]
+        review_frames = [frame for frame in frames if frame.quality_gate == "review"]
+        pool = pass_frames if pass_frames else review_frames if review_frames else frames
+        kept.extend(sorted(pool, key=lambda item: item.quality_score, reverse=True)[:top_k])
     return sorted(kept, key=lambda item: (item.clip.index, item.frame))
 
 
@@ -296,6 +425,8 @@ def score_candidate_pair(a: FrameCandidate, b: FrameCandidate) -> Optional[Dict[
         return None
     if len(a.branches) < 2 or len(b.branches) < 2:
         return None
+    if a.quality_gate == "reject" or b.quality_gate == "reject":
+        return None
     sep = angle_separation(a.clip, b.clip)
     if sep < 18.0:
         return None
@@ -348,17 +479,38 @@ def score_candidate_pair(a: FrameCandidate, b: FrameCandidate) -> Optional[Dict[
     p90_epipolar = float(np.median([item["p90"] for item in best_scores]))
     objective = float(np.median([item["objective"] for item in best_scores]))
     quality = (a.quality_score + b.quality_score) * 0.5
+    min_quality = min(a.quality_score, b.quality_score)
     phase = same_phase_shape_score(a, b)
     branch_count_ratio = min(len(a.branches), len(b.branches)) / max(len(a.branches), len(b.branches), 1)
     area_ratio = min(a.area_pct, b.area_pct) / max(a.area_pct, b.area_pct, 1e-6)
     coverage_penalty = 0.0
     if min(len(a.branches), len(b.branches)) < 7:
-        coverage_penalty += 14.0
+        coverage_penalty += (7 - min(len(a.branches), len(b.branches))) * 6.0
+    if min(len(a.branches), len(b.branches)) < 4:
+        coverage_penalty += 18.0
+    if min(a.anatomy_visibility_score, b.anatomy_visibility_score) < 52.0:
+        coverage_penalty += (52.0 - min(a.anatomy_visibility_score, b.anatomy_visibility_score)) * 0.55
+    if min(a.anatomy_visibility_score, b.anatomy_visibility_score) < 62.0:
+        coverage_penalty += (62.0 - min(a.anatomy_visibility_score, b.anatomy_visibility_score)) * 0.65
+    epipolar_penalty = 0.0
+    if objective > 7.0:
+        epipolar_penalty += (objective - 7.0) * 4.2
+    if median_epipolar > 5.5:
+        epipolar_penalty += (median_epipolar - 5.5) * 3.0
+    if p90_epipolar > 11.0:
+        epipolar_penalty += (p90_epipolar - 11.0) * 1.4
     if branch_count_ratio < 0.55:
         coverage_penalty += (0.55 - branch_count_ratio) * 45.0
+    clinical_quality_penalty = 0.0
+    if min_quality < 35.0:
+        clinical_quality_penalty += (35.0 - min_quality) * 0.9
+    if a.quality_gate == "review":
+        clinical_quality_penalty += 7.0
+    if b.quality_gate == "review":
+        clinical_quality_penalty += 7.0
     score = (
         28.0 * angle_score(sep)
-        + 0.22 * quality
+        + 0.42 * quality
         + 11.0 * reliable
         + 5.0 * usable
         + 35.0 * branch_count_ratio
@@ -367,6 +519,8 @@ def score_candidate_pair(a: FrameCandidate, b: FrameCandidate) -> Optional[Dict[
         - 1.6 * objective
         - 0.15 * p90_epipolar
         - coverage_penalty
+        - clinical_quality_penalty
+        - epipolar_penalty
     )
 
     return {
@@ -383,6 +537,21 @@ def score_candidate_pair(a: FrameCandidate, b: FrameCandidate) -> Optional[Dict[
         "estimated_usable_matches": usable,
         "view_a_quality": a.quality_score,
         "view_b_quality": b.quality_score,
+        "view_a_quality_gate": a.quality_gate,
+        "view_b_quality_gate": b.quality_gate,
+        "view_a_quality_reason": a.quality_reason,
+        "view_b_quality_reason": b.quality_reason,
+        "view_a_sharpness_score": a.sharpness_score,
+        "view_b_sharpness_score": b.sharpness_score,
+        "view_a_vessel_contrast_score": a.vessel_contrast_score,
+        "view_b_vessel_contrast_score": b.vessel_contrast_score,
+        "view_a_continuity_score": a.continuity_score,
+        "view_b_continuity_score": b.continuity_score,
+        "view_a_anatomy_visibility_score": a.anatomy_visibility_score,
+        "view_b_anatomy_visibility_score": b.anatomy_visibility_score,
+        "clinical_quality_penalty": clinical_quality_penalty,
+        "coverage_penalty": coverage_penalty,
+        "epipolar_penalty": epipolar_penalty,
         "view_a_branches": len(a.branches),
         "view_b_branches": len(b.branches),
         "view_a_area_pct": a.area_pct,
@@ -444,6 +613,17 @@ def candidate_to_row(candidate: FrameCandidate) -> Dict[str, object]:
         "primary_angle_deg": candidate.clip.primary,
         "secondary_angle_deg": candidate.clip.secondary,
         "quality_score": candidate.quality_score,
+        "base_mask_quality_score": candidate.base_mask_quality_score,
+        "sharpness_score": candidate.sharpness_score,
+        "contrast_score": candidate.contrast_score,
+        "vessel_contrast_score": candidate.vessel_contrast_score,
+        "continuity_score": candidate.continuity_score,
+        "anatomy_visibility_score": candidate.anatomy_visibility_score,
+        "fragmentation_penalty": candidate.fragmentation_penalty,
+        "exposure_penalty": candidate.exposure_penalty,
+        "clinical_quality_score": candidate.clinical_quality_score,
+        "quality_gate": candidate.quality_gate,
+        "quality_reason": candidate.quality_reason,
         "branches": len(candidate.branches),
         "area_pct": candidate.area_pct,
         "total_length_px": candidate.total_length_px,
@@ -478,7 +658,7 @@ def save_preview_grid(candidates: List[FrameCandidate], output_path: Path, max_i
     thumbs = []
     for item in selected:
         preview = cv2.resize(item.overlay, (256, 256), interpolation=cv2.INTER_AREA)
-        label = f"IM{item.clip.index} F{item.frame} Q{item.quality_score:.0f}"
+        label = f"IM{item.clip.index} F{item.frame} Q{item.quality_score:.0f} {item.quality_gate}"
         cv2.putText(preview, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
         thumbs.append(preview)
     if not thumbs:
@@ -536,10 +716,25 @@ def main():
     validation_view = choose_validation_view(best_pair, candidates)
 
     with open(out / "frame_candidates.csv", "w", newline="", encoding="utf-8") as f:
-        rows = [candidate_to_row(candidate) for candidate in candidates]
+        rows = [candidate_to_row(candidate) for candidate in all_candidates]
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+    selected_rows = [candidate_to_row(candidate) for candidate in candidates]
+    with open(out / "selected_frame_candidates.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(selected_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(selected_rows)
+
+    non_pass_rows = [candidate_to_row(candidate) for candidate in all_candidates if candidate.quality_gate != "pass"]
+    with open(out / "rejected_frame_report.csv", "w", newline="", encoding="utf-8") as f:
+        if non_pass_rows:
+            writer = csv.DictWriter(f, fieldnames=list(non_pass_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(non_pass_rows)
+        else:
+            f.write("clip_index,frame,quality_gate,quality_reason\n")
 
     with open(out / "clip_classification_report.csv", "w", newline="", encoding="utf-8") as f:
         rows = clip_classification_rows(clips)
@@ -578,6 +773,7 @@ def main():
         "selection_method": {
             "artery_rule": "known LCA and RCA clips are never paired together; unknown pairs are allowed but marked for review",
             "frame_pair_rule": "candidate frames are scored as pairs using vessel quality, epipolar consistency, and image-based cardiac phase/shape similarity",
+            "frame_quality_rule": "frames are gated by sharpness, contrast, vessel/background contrast, continuity, fragmentation, and exposure artifacts",
         },
         "recommended_main_pair": best_pair,
         "optional_validation_view": validation_view,
@@ -589,6 +785,8 @@ def main():
         ),
         "outputs": {
             "frame_candidates": str(out / "frame_candidates.csv"),
+            "selected_frame_candidates": str(out / "selected_frame_candidates.csv"),
+            "rejected_frame_report": str(out / "rejected_frame_report.csv"),
             "clip_classification_report": str(out / "clip_classification_report.csv"),
             "frame_pair_candidates": str(out / "frame_pair_candidates.csv"),
             "view_pair_rankings": str(out / "view_pair_rankings.csv"),

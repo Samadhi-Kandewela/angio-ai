@@ -222,6 +222,100 @@ def blend_junctions(branches: List[BranchMesh]):
     return junctions
 
 
+def endpoint_tangent(branch: BranchMesh, side: str) -> np.ndarray:
+    if len(branch.centerline) < 2:
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    if side == "start":
+        tangent = branch.centerline[0] - branch.centerline[1]
+    else:
+        tangent = branch.centerline[-1] - branch.centerline[-2]
+    norm = np.linalg.norm(tangent)
+    return tangent / max(norm, 1e-9)
+
+
+def endpoint_radius(branch: BranchMesh, side: str) -> float:
+    return float(branch.radii[0] if side == "start" else branch.radii[-1])
+
+
+def make_estimated_connectors(branches: List[BranchMesh], min_gap: float = 3.2, max_gap: float = 15.0, max_connectors: int = 10):
+    endpoints = []
+    for branch in branches:
+        endpoints.append(
+            {
+                "branch": branch,
+                "branch_id": branch.branch_id,
+                "side": "start",
+                "point": branch.centerline[0],
+                "tangent": endpoint_tangent(branch, "start"),
+                "radius": endpoint_radius(branch, "start"),
+            }
+        )
+        endpoints.append(
+            {
+                "branch": branch,
+                "branch_id": branch.branch_id,
+                "side": "end",
+                "point": branch.centerline[-1],
+                "tangent": endpoint_tangent(branch, "end"),
+                "radius": endpoint_radius(branch, "end"),
+            }
+        )
+
+    candidates = []
+    for i, a in enumerate(endpoints):
+        for b in endpoints[i + 1:]:
+            if a["branch_id"] == b["branch_id"]:
+                continue
+            delta = b["point"] - a["point"]
+            gap = float(np.linalg.norm(delta))
+            if gap < min_gap or gap > max_gap:
+                continue
+            direction = delta / max(gap, 1e-9)
+            tangent_a = float(np.dot(a["tangent"], direction))
+            tangent_b = float(np.dot(b["tangent"], -direction))
+            if tangent_a < -0.15 or tangent_b < -0.15:
+                continue
+            radius = max(0.35, min(1.2, 0.85 * 0.5 * (a["radius"] + b["radius"])))
+            score = gap - 2.0 * max(tangent_a, 0.0) - 2.0 * max(tangent_b, 0.0)
+            candidates.append((score, gap, tangent_a, tangent_b, radius, a, b))
+
+    selected = []
+    used_endpoints = set()
+    for _, gap, tangent_a, tangent_b, radius, a, b in sorted(candidates, key=lambda item: item[0]):
+        key_a = (a["branch_id"], a["side"])
+        key_b = (b["branch_id"], b["side"])
+        if key_a in used_endpoints or key_b in used_endpoints:
+            continue
+        used_endpoints.add(key_a)
+        used_endpoints.add(key_b)
+        p0 = a["point"]
+        p3 = b["point"]
+        handle = min(gap * 0.38, 5.0)
+        p1 = p0 + a["tangent"] * handle
+        p2 = p3 + b["tangent"] * handle
+        t = np.linspace(0.0, 1.0, 16)[:, None]
+        curve = ((1 - t) ** 3) * p0 + 3 * ((1 - t) ** 2) * t * p1 + 3 * (1 - t) * (t ** 2) * p2 + (t ** 3) * p3
+        curve = smooth_centerline(curve, window=5, iterations=1)
+        radii = np.full(len(curve), radius, dtype=np.float64)
+        selected.append(
+            {
+                "branch_a": int(a["branch_id"]),
+                "side_a": a["side"],
+                "branch_b": int(b["branch_id"]),
+                "side_b": b["side"],
+                "gap_mm": round(gap, 3),
+                "tangent_a": round(tangent_a, 3),
+                "tangent_b": round(tangent_b, 3),
+                "radius_mm": round(radius, 3),
+                "points": curve,
+                "radii": radii,
+            }
+        )
+        if len(selected) >= max_connectors:
+            break
+    return selected
+
+
 def make_frame(tangent: np.ndarray):
     tangent = tangent / max(np.linalg.norm(tangent), 1e-9)
     ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
@@ -278,6 +372,7 @@ def write_obj(path: Path, parts):
         f.write("newmtl reliable\nKd 0.78 0.78 0.78\n")
         f.write("newmtl usable\nKd 0.45 0.65 1.0\n")
         f.write("newmtl single_view_preserved\nKd 1.0 0.58 0.12\n")
+        f.write("newmtl estimated_connector\nKd 0.68 0.70 0.72\n")
         f.write("newmtl junction\nKd 0.86 0.86 0.86\n")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"mtllib {path.with_suffix('.mtl').name}\n")
@@ -335,6 +430,26 @@ def process(input_dir: Path, output_obj: Path):
         vertices, faces = make_sphere(center, max(0.45, min(1.3, radius * 1.08)))
         parts.append((f"junction_{idx:02d}", "junction", vertices, faces))
 
+    connectors = make_estimated_connectors(processed)
+    connector_report = []
+    for idx, connector in enumerate(connectors):
+        vertices, faces = make_tube(connector["points"], connector["radii"], segments=10)
+        parts.append((f"estimated_connector_{idx:02d}_branch_{connector['branch_a']:02d}_{connector['branch_b']:02d}", "estimated_connector", vertices, faces))
+        connector_report.append(
+            {
+                "connector_id": idx,
+                "branch_a": connector["branch_a"],
+                "side_a": connector["side_a"],
+                "branch_b": connector["branch_b"],
+                "side_b": connector["side_b"],
+                "gap_mm": connector["gap_mm"],
+                "tangent_a": connector["tangent_a"],
+                "tangent_b": connector["tangent_b"],
+                "radius_mm": connector["radius_mm"],
+                "status": "estimated_connector",
+            }
+        )
+
     write_obj(output_obj, parts)
     with open(output_obj.with_name("smoothed_junction_radius_report.csv"), "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(smooth_report[0].keys()))
@@ -346,8 +461,15 @@ def process(input_dir: Path, output_obj: Path):
             "output_obj": str(output_obj),
             "branches": len(processed),
             "junction_blend_nodes": len(junctions),
+            "estimated_connectors": len(connectors),
             "report": str(output_obj.with_name("smoothed_junction_radius_report.csv")),
+            "connector_report": str(output_obj.with_name("estimated_connector_report.csv")),
         }, f, indent=2)
+    if connector_report:
+        with open(output_obj.with_name("estimated_connector_report.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(connector_report[0].keys()))
+            writer.writeheader()
+            writer.writerows(connector_report)
 
 
 def main():

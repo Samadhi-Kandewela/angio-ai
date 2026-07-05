@@ -11,6 +11,12 @@ checkpoints/
 *.onnx
 
 #3d middle folders/
+paper_text_extracts/
+raw_images/
+create_raw_images.py
+case003*
+coronario/
+3d reconstruction papers/
 3d angio/
 instances_default.json
 reconstructions/

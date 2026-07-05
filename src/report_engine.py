@@ -77,6 +77,69 @@ class AngleResult:
         return None
 
 
+def _analyze_frame_iterable(frame_iter, n_frames_total: int, angle_label: str, source_label: str,
+                            seg_model: SegmentationModel,
+                            loc_model: Optional[LocalizationModel],
+                            cfg: QCAConfig, threshold: float,
+                            progress_cb: Optional[Callable[[int, int], None]]) -> AngleResult:
+    """
+    Shared whole-run QCA analysis loop: runs segmentation + QCA over every
+    frame yielded by frame_iter. Only frames containing >=1 detected lesion
+    are retained in memory, then detections are clustered into per-lesion
+    tracks across the whole run. Used by both analyze_angle_video() (reads
+    from a video file) and analyze_frame_list() (an already-decoded list,
+    e.g. from a loaded DICOM series).
+    """
+    frame_records: List[FrameRecord] = []
+    loc_class_map = None
+    loc_confidence_map = None
+    frame_idx = 0
+
+    for frame in frame_iter:
+        img_rgb_original, img_rgb_enhanced, img_batch, img_gray = preprocess_frame(frame)
+        mask_binary = segment_frame(seg_model, img_batch, threshold)
+
+        if loc_model is not None and (
+            loc_class_map is None or frame_idx % LOC_FRAME_INTERVAL == 0
+        ):
+            try:
+                loc_class_map, loc_confidence_map = run_localization_frame(loc_model, img_rgb_enhanced)
+            except Exception:
+                loc_class_map, loc_confidence_map = None, None
+
+        branches, lesions, dt, bw = run_qca_frame(
+            img_gray, mask_binary, cfg,
+            class_map=loc_class_map, confidence_map=loc_confidence_map,
+        )
+
+        if lesions:
+            for les in lesions:
+                les["frame_idx"] = frame_idx
+            frame_records.append(FrameRecord(
+                frame_idx=frame_idx, img_gray=img_gray, img_rgb=img_rgb_original,
+                bw_mask=bw, dt=dt, branches=branches, lesions=lesions,
+            ))
+
+        frame_idx += 1
+        if progress_cb is not None:
+            progress_cb(frame_idx, n_frames_total)
+
+    has_localization = loc_model is not None
+    tracks = build_lesion_tracks(frame_records, has_localization)
+    summary_frame_idx = select_summary_frame(tracks, frame_records)
+
+    return AngleResult(
+        angle_label=angle_label,
+        video_path=source_label,
+        n_frames_total=n_frames_total,
+        n_frames_analyzed=frame_idx,
+        frame_records=frame_records,
+        tracks=tracks,
+        summary_frame_idx=summary_frame_idx,
+        has_localization=has_localization,
+    )
+
+
 def analyze_angle_video(video_path: str, angle_label: str,
                         seg_model: SegmentationModel,
                         loc_model: Optional[LocalizationModel],
@@ -94,60 +157,37 @@ def analyze_angle_video(video_path: str, angle_label: str,
 
     n_frames_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-    frame_records: List[FrameRecord] = []
-    loc_class_map = None
-    loc_confidence_map = None
-    frame_idx = 0
+    def _frames():
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                yield frame
+        finally:
+            cap.release()
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+    return _analyze_frame_iterable(
+        _frames(), n_frames_total, angle_label, video_path,
+        seg_model, loc_model, cfg, threshold, progress_cb,
+    )
 
-            img_rgb_original, img_rgb_enhanced, img_batch, img_gray = preprocess_frame(frame)
-            mask_binary = segment_frame(seg_model, img_batch, threshold)
 
-            if loc_model is not None and (
-                loc_class_map is None or frame_idx % LOC_FRAME_INTERVAL == 0
-            ):
-                try:
-                    loc_class_map, loc_confidence_map = run_localization_frame(loc_model, img_rgb_enhanced)
-                except Exception:
-                    loc_class_map, loc_confidence_map = None, None
-
-            branches, lesions, dt, bw = run_qca_frame(
-                img_gray, mask_binary, cfg,
-                class_map=loc_class_map, confidence_map=loc_confidence_map,
-            )
-
-            if lesions:
-                for les in lesions:
-                    les["frame_idx"] = frame_idx
-                frame_records.append(FrameRecord(
-                    frame_idx=frame_idx, img_gray=img_gray, img_rgb=img_rgb_original,
-                    bw_mask=bw, dt=dt, branches=branches, lesions=lesions,
-                ))
-
-            frame_idx += 1
-            if progress_cb is not None:
-                progress_cb(frame_idx, n_frames_total)
-    finally:
-        cap.release()
-
-    has_localization = loc_model is not None
-    tracks = build_lesion_tracks(frame_records, has_localization)
-    summary_frame_idx = select_summary_frame(tracks, frame_records)
-
-    return AngleResult(
-        angle_label=angle_label,
-        video_path=video_path,
-        n_frames_total=n_frames_total,
-        n_frames_analyzed=frame_idx,
-        frame_records=frame_records,
-        tracks=tracks,
-        summary_frame_idx=summary_frame_idx,
-        has_localization=has_localization,
+def analyze_frame_list(frames: List[np.ndarray], angle_label: str,
+                       seg_model: SegmentationModel,
+                       loc_model: Optional[LocalizationModel],
+                       cfg: QCAConfig,
+                       threshold: float = 0.5,
+                       progress_cb: Optional[Callable[[int, int], None]] = None) -> AngleResult:
+    """
+    Same whole-run QCA analysis as analyze_angle_video(), but over an
+    already-decoded list of frames (e.g. from dicom_loader.load_series_frames())
+    instead of opening a video file -- used by the DICOM analysis page, which
+    already has the series' frames loaded in memory.
+    """
+    return _analyze_frame_iterable(
+        iter(frames), len(frames), angle_label, f"<{len(frames)} in-memory frames>",
+        seg_model, loc_model, cfg, threshold, progress_cb,
     )
 
 
@@ -192,14 +232,40 @@ def build_lesion_tracks(frame_records: List[FrameRecord], has_localization: bool
     return tracks
 
 
+
+# A frame only qualifies for the summary diagram if its opacified/traceable
+# vessel length is at least this fraction of the best-opacified frame in the
+# run -- otherwise a partially-filled frame (early/late in the contrast
+# injection, "ink" not yet spread) could win purely on an incidental lesion
+# coincidence while looking washed-out and largely vessel-free.
+MIN_VESSEL_COVERAGE_FRACTION = 0.7
+
+
+def _vessel_coverage(rec: FrameRecord) -> int:
+    """Total traced skeleton length across all branches -- a proxy for how
+    much of the coronary tree is opacified and visible in this frame."""
+    return sum(len(b) for b in rec.branches)
+
+
 def select_summary_frame(tracks: List[LesionTrack], frame_records: List[FrameRecord]) -> Optional[int]:
     """
-    Picks the single stored frame that simultaneously shows detections for the
-    most distinct lesion tracks (tie-break: highest summed confidence). This
-    becomes the per-angle 2D overview diagram.
+    Picks the single stored frame to use for the per-angle 2D overview
+    diagram. First narrows to well-opacified frames (vessel coverage within
+    MIN_VESSEL_COVERAGE_FRACTION of the best frame in the run), then among
+    those picks the one showing the most distinct lesion tracks simultaneously
+    (tie-break: highest summed confidence) -- so the diagram never favors a
+    partially-contrasted, hard-to-read frame just because it happens to
+    contain one extra incidental lesion.
     """
     if not frame_records:
         return None
+
+    max_coverage = max((_vessel_coverage(rec) for rec in frame_records), default=0)
+    if max_coverage > 0:
+        threshold = max_coverage * MIN_VESSEL_COVERAGE_FRACTION
+        candidates = [rec for rec in frame_records if _vessel_coverage(rec) >= threshold]
+    else:
+        candidates = frame_records
 
     track_of_lesion = {}
     for t in tracks:
@@ -207,7 +273,7 @@ def select_summary_frame(tracks: List[LesionTrack], frame_records: List[FrameRec
             track_of_lesion[(les["frame_idx"], id(les))] = t.track_id
 
     best_idx, best_score = None, (-1, -1.0)
-    for rec in frame_records:
+    for rec in candidates:
         track_ids_here = set()
         conf_sum = 0.0
         for les in rec.lesions:

@@ -7,10 +7,13 @@ an arbitrary frame via Seek (e.g. dragging the frame slider) -- reusing the
 exact same frame_pipeline path as the live preview (desktop_app_qca.py) and
 the offline QCA report generator, so results are consistent everywhere.
 
-Per-frame QCA (skeletonization, branch decomposition, sub-pixel lesion
-refinement) takes on the order of a second, so this deliberately does not
-try to play back at the source frame rate -- each frame is fully analyzed
-before the next is shown, paced by that analysis time itself.
+Per-frame processing is dominated by the segmentation and localization
+neural network passes (each a few hundred ms on CPU) -- skeletonization and
+lesion detection (QCA proper) are cheap by comparison (tens of ms) and
+always run in full, every frame, so the stenosis overlay never lags behind
+or misaligns with the picture on screen. This deliberately does not try to
+play back at the source frame rate -- each frame is fully analyzed before
+the next is shown, paced by that analysis time itself.
 """
 import time
 
@@ -19,7 +22,9 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from qca import QCAConfig
-from frame_pipeline import preprocess_frame, segment_frame, run_localization_frame, run_qca_frame
+from frame_pipeline import (
+    preprocess_frame, segment_frame, run_localization_frame, clean_vessel_mask, run_qca_from_clean_mask,
+)
 from report_engine import draw_live_stenosis_overlay
 
 
@@ -28,12 +33,6 @@ class DicomAnalysisThread(QThread):
     frame_ready = Signal(np.ndarray, np.ndarray, np.ndarray, int, int, float, str)
     playback_finished = Signal()
     error = Signal(str)
-
-    # While playing, QCA (stenosis detection) only re-runs every Nth frame --
-    # it's the expensive part of the pipeline and doesn't need to update
-    # faster than a person can read it. Seeking/stepping always re-runs it
-    # immediately for that exact frame, regardless of this interval.
-    STENOSIS_FRAME_INTERVAL = 5
 
     def __init__(self):
         super().__init__()
@@ -54,19 +53,12 @@ class DicomAnalysisThread(QThread):
         self._loc_class_map = None
         self._loc_confidence_map = None
 
-        self._frames_since_qca = 0
-        self._last_qca_vis_rgb = None
-        self._last_info = None
-
     # ── Control API (safe to call from the UI thread) ──────────────
     def set_frames(self, frames):
         self.frames = frames
         self._index = 0
         self._loc_class_map = None
         self._loc_confidence_map = None
-        self._frames_since_qca = 0
-        self._last_qca_vis_rgb = None
-        self._last_info = None
 
     def play(self):
         self._playing = True
@@ -134,51 +126,36 @@ class DicomAnalysisThread(QThread):
                 overlay, self.overlay_alpha, img_rgb_original, 1.0 - self.overlay_alpha, 0
             )
 
-            # QCA (skeletonization + lesion detection) is the expensive part of the
-            # pipeline, so during continuous Play it only re-runs every
-            # STENOSIS_FRAME_INTERVAL frames -- the stenosis panel holds its last
-            # rendered result in between. Seeking/stepping (not self._playing)
-            # always re-runs it immediately for that exact frame.
-            run_qca_now = (
-                not self._playing
-                or self._frames_since_qca >= self.STENOSIS_FRAME_INTERVAL - 1
-                or self._last_qca_vis_rgb is None
+            # Both halves of QCA are cheap relative to the neural network
+            # passes above (tens of ms vs hundreds), so both run in full every
+            # frame -- the overlay (contour + centerline + lesions) always
+            # matches exactly what's on screen, never a held-over stale result.
+            bw = clean_vessel_mask(mask_binary, self.qca_cfg)
+            branches, lesions, dt = run_qca_from_clean_mask(
+                bw, self.qca_cfg,
+                class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+                use_merged_labels=(self.loc_model.use_merged_labels if self.loc_model is not None else False),
             )
 
-            if run_qca_now:
-                self._frames_since_qca = 0
-                branches, lesions, dt, bw = run_qca_frame(
-                    img_gray, mask_binary, self.qca_cfg,
-                    class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
-                    use_merged_labels=(self.loc_model.use_merged_labels if self.loc_model is not None else False),
-                )
-
-                if branches:
-                    qca_vis_bgr = draw_live_stenosis_overlay(img_gray, bw, branches, lesions)
-                    qca_vis_rgb = cv2.cvtColor(qca_vis_bgr, cv2.COLOR_BGR2RGB)
-                    if lesions:
-                        top = lesions[0]
-                        loc_text = ""
-                        if "localization" in top:
-                            loc = top["localization"]
-                            loc_text = f"  Location={loc['group']} ({loc['label']})  LocConf={loc['confidence']:.2f}"
-                        info = (
-                            f"Top Lesion: DS={top['DS_percent']:.1f}%  Severity={top['severity']}  "
-                            f"MLD={top['MLD_px']:.1f}px  RVD={top['RVD_px']:.1f}px{loc_text}  "
-                            f"| Total Lesions: {len(lesions)} across {len(branches)} branches"
-                        )
-                    else:
-                        info = f"No stenosis detected | {len(branches)} branches analyzed"
+            if branches:
+                qca_vis_bgr = draw_live_stenosis_overlay(img_gray, bw, branches, lesions)
+                qca_vis_rgb = cv2.cvtColor(qca_vis_bgr, cv2.COLOR_BGR2RGB)
+                if lesions:
+                    top = lesions[0]
+                    loc_text = ""
+                    if "localization" in top:
+                        loc = top["localization"]
+                        loc_text = f"  Location={loc['group']} ({loc['label']})  LocConf={loc['confidence']:.2f}"
+                    info = (
+                        f"Top Lesion: DS={top['DS_percent']:.1f}%  Severity={top['severity']}  "
+                        f"MLD={top['MLD_px']:.1f}px  RVD={top['RVD_px']:.1f}px{loc_text}  "
+                        f"| Total Lesions: {len(lesions)} across {len(branches)} branches"
+                    )
                 else:
-                    qca_vis_rgb = mask_overlay_rgb.copy()
-                    info = "QCA: Insufficient mask data for analysis"
-
-                self._last_qca_vis_rgb = qca_vis_rgb
-                self._last_info = info
+                    info = f"No stenosis detected | {len(branches)} branches analyzed"
             else:
-                self._frames_since_qca += 1
-                qca_vis_rgb = self._last_qca_vis_rgb
-                info = self._last_info
+                qca_vis_rgb = mask_overlay_rgb.copy()
+                info = "QCA: Insufficient mask data for analysis"
 
             latency_ms = (time.perf_counter() - t0) * 1000.0
             self.frame_ready.emit(

@@ -54,6 +54,7 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.onnx"),
     os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.onnx"),

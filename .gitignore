@@ -256,3 +256,5 @@ plot_*.py
 # !/checkpoints/**/*.onnx
 # !/checkpoints/**/*.pth
 patient_data/
+
+rename_data_images.py

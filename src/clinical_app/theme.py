@@ -193,6 +193,20 @@ def build_stylesheet() -> str:
     }}
 
     /* ── Buttons ─────────────────────────────────────────────────── */
+    QProgressBar {{
+        background-color: {SURFACE_ALT};
+        color: {WHITE};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+        text-align: center;
+        height: 18px;
+        font-weight: 600;
+    }}
+    QProgressBar::chunk {{
+        background-color: {ACCENT};
+        border-radius: 5px;
+    }}
+
     QPushButton {{
         background-color: {SURFACE_ALT};
         color: {WHITE};
@@ -248,6 +262,13 @@ def build_stylesheet() -> str:
     QListWidget::item:selected {{
         background-color: {BORDER};
         color: {ACCENT};
+    }}
+    QListWidget#seriesList, QListWidget#savedViewsList {{
+        border-radius: 8px;
+    }}
+    QListWidget#seriesList::item, QListWidget#savedViewsList::item {{
+        padding: 8px 10px;
+        min-height: 42px;
     }}
 
     /* ── Status bar ──────────────────────────────────────────────── */

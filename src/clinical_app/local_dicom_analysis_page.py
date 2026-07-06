@@ -17,7 +17,7 @@ from PySide6.QtGui import QImage, QPixmap, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
     QComboBox, QSlider, QPushButton, QFrame, QFileDialog, QListWidget,
-    QListWidgetItem, QCheckBox, QMessageBox, QSizePolicy, QScrollArea, QInputDialog
+    QListWidgetItem, QCheckBox, QMessageBox, QSizePolicy, QScrollArea
 )
 
 import patient_store
@@ -97,7 +97,7 @@ class _ViewAnalysisThread(QThread):
     finished_ok = Signal(object)  # AngleResult
     error = Signal(str)
 
-    def __init__(self, frames, view_label, seg_model, loc_model, cfg, threshold):
+    def __init__(self, frames, view_label, seg_model, loc_model, cfg, threshold, source_label=None):
         super().__init__()
         self.frames = frames
         self.view_label = view_label
@@ -105,6 +105,7 @@ class _ViewAnalysisThread(QThread):
         self.loc_model = loc_model
         self.cfg = cfg
         self.threshold = threshold
+        self.source_label = source_label
 
     def run(self):
         try:
@@ -115,6 +116,7 @@ class _ViewAnalysisThread(QThread):
             result = analyze_frame_list(
                 self.frames, self.view_label, self.seg_model, self.loc_model,
                 self.cfg, threshold=self.threshold, progress_cb=_cb,
+                source_label=self.source_label,
             )
             self.finished_ok.emit(result)
         except Exception as e:
@@ -407,7 +409,9 @@ class LocalDicomAnalysisPage(QWidget):
         hint = QLabel(
             "Analyzing the full series aggregates stenosis detections across every frame into one "
             "authoritative reading per lesion (not a single noisy frame) and saves the result into "
-            "this case's analysis_results/ folder, alongside a per-view explainable report."
+            "this case's analysis_results/ folder, alongside a per-view explainable report. Each view "
+            "is automatically named from its series description and file (e.g. \"Left Coronary 15 fps "
+            "— 000005\"), so no manual labeling is needed."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -687,6 +691,15 @@ class LocalDicomAnalysisPage(QWidget):
             )
             self._refresh_final_report_status()
 
+    def select_case_by_id(self, case_id: str):
+        """Refreshes the case list and selects the given case, e.g. when navigated to from
+        the Patient Records page's "Go to DICOM Analysis" button."""
+        self.refresh_cases()
+        for i, case in enumerate(self._cases):
+            if case["case_id"] == case_id:
+                self.combo_case.setCurrentIndex(i)
+                return
+
     def _on_case_selected(self, index: int):
         self.list_series.clear()
         self._series = []
@@ -925,15 +938,31 @@ class LocalDicomAnalysisPage(QWidget):
             return
 
         row = self.list_series.currentRow()
-        default_label = self._series[row].description if 0 <= row < len(self._series) else "View"
-
-        label, ok = QInputDialog.getText(
-            self, "View Label", "Label for this angiographic view (e.g. RAO 30 / CRA 20):",
-            text=default_label,
-        )
-        if not ok:
+        if not (0 <= row < len(self._series)):
+            self.lbl_save_status.setText("Select a series from the list first.")
             return
-        label = label.strip() or default_label
+        series_info = self._series[row]
+        series_path = str(series_info.path)
+        # Auto-derived, unique per underlying file: several series in the same
+        # study often share an identical, generic SeriesDescription (e.g. every
+        # series here is "Left Coronary 15 fps"), so the description alone is
+        # ambiguous -- appending the file stem keeps the clinical context while
+        # guaranteeing each series gets its own distinct, reproducible label.
+        label = f"{series_info.description} — {series_info.path.stem}"
+
+        analysis_dir = patient_store.get_case_analysis_dir(case["case_id"])
+        existing = [v for v in analysis_results_store.list_view_results(analysis_dir)
+                   if v.get("source") == series_path]
+        if existing:
+            when = existing[0].get("analyzed_at", "an earlier analysis")
+            proceed = QMessageBox.question(
+                self, "Re-analyze This Series?",
+                f"'{label}' was already analyzed and saved (on {when}).\n\n"
+                "Re-analyze and overwrite the saved results and view report?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if proceed != QMessageBox.Yes:
+                return
 
         self._pending_case_id = case["case_id"]
         self._view_analysis_is_preview_only = False
@@ -945,6 +974,7 @@ class LocalDicomAnalysisPage(QWidget):
             list(self._series_frames), label,
             self.analysis_thread.seg_model, self.analysis_thread.loc_model,
             self.analysis_thread.qca_cfg, self.analysis_thread.threshold,
+            source_label=series_path,
         )
         self._view_analysis_thread.progress.connect(self.lbl_save_status.setText)
         self._view_analysis_thread.finished_ok.connect(self._on_view_analysis_finished)

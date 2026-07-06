@@ -194,15 +194,21 @@ def analyze_frame_list(frames: List[np.ndarray], angle_label: str,
                        loc_model: Optional[LocalizationModel],
                        cfg: QCAConfig,
                        threshold: float = 0.5,
-                       progress_cb: Optional[Callable[[int, int], None]] = None) -> AngleResult:
+                       progress_cb: Optional[Callable[[int, int], None]] = None,
+                       source_label: Optional[str] = None) -> AngleResult:
     """
     Same whole-run QCA analysis as analyze_angle_video(), but over an
     already-decoded list of frames (e.g. from dicom_loader.load_series_frames())
     instead of opening a video file -- used by the DICOM analysis page, which
     already has the series' frames loaded in memory.
+
+    `source_label` should identify the actual source (e.g. the DICOM series
+    file path) when the caller has one, so a saved AngleResult can later be
+    recognized as "the same series analyzed again" rather than just a generic
+    frame count -- falls back to a generic in-memory description if omitted.
     """
     return _analyze_frame_iterable(
-        iter(frames), len(frames), angle_label, f"<{len(frames)} in-memory frames>",
+        iter(frames), len(frames), angle_label, source_label or f"<{len(frames)} in-memory frames>",
         seg_model, loc_model, cfg, threshold, progress_cb,
     )
 

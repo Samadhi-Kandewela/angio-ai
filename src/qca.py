@@ -34,6 +34,16 @@ class QCAConfig:
     ref_win_dist: int = 40                   # points after lesion for RVD estimate
     min_lesion_points: int = 3               # minimum centerline span to count as a lesion
 
+    # A lesion minimum sitting too close to a branch's own start/end is
+    # usually sitting in the transition zone into/out of a parent vessel at a
+    # bifurcation, not a true focal stenosis -- excluded via min_edge_margin.
+    # Likewise, a reference window with too few points on a side falls back to
+    # (or gets contaminated by) that same transition zone; min_ref_points_per_side
+    # requires a properly-established run of the branch's OWN caliber before
+    # trusting that side's points, rather than accepting as few as 3.
+    min_edge_margin: int = 10                 # px from a branch's own start/end excluded from lesion candidates
+    min_ref_points_per_side: int = 10         # min points needed on a side before it contributes to the reference
+
     # Severity thresholds — four-tier scheme per the JACIT/ARC-2 hierarchical
     # consensus (QCA_CAL.md): repeat revascularization is clinically indicated
     # for (1) DS > 50% WITH recurrent symptoms or a positive functional test,
@@ -745,6 +755,15 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
     ref_cap = branch_median_dt * 2.0        # reference ceiling in smoothed-diameter space
 
     for m in minima:
+        # Skip minima too close to a branch's own start/end — these usually sit
+        # in the transition zone into/out of a parent vessel at a bifurcation
+        # (skeleton degree transitions, natural tapering at tips), not a true
+        # focal stenosis, and any reference window built near there risks being
+        # contaminated by the wider parent vessel's diameter.
+        edge_margin = max(cfg.min_edge_margin, cfg.min_lesion_points)
+        if m < edge_margin or m > N - 1 - edge_margin:
+            continue
+
         left0 = max(0, m - cfg.ref_win_prox)
         right0 = min(N - 1, m + cfg.ref_win_dist)
         prox_avail = m - left0
@@ -753,19 +772,25 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
         # Reference diameter: healthy vessel on EITHER side of the lesion.
         # Values above ref_cap are catheter / aortic territory and are excluded.
         # Per clinical consensus, reference = adjacent healthy-segment diameter.
+        # A side only contributes once it has enough points to represent the
+        # branch's OWN established caliber (min_ref_points_per_side) -- a
+        # handful of points right next to the lesion is usually still inside
+        # the same contaminated transition zone the edge_margin check above
+        # is guarding against.
         ref_candidates: List[float] = []
-        if prox_avail >= 3:
+        if prox_avail >= cfg.min_ref_points_per_side:
             ref_candidates.extend([v for v in d_s[left0:m] if v <= ref_cap])
-        if dist_avail >= 3:
+        if dist_avail >= cfg.min_ref_points_per_side:
             ref_candidates.extend([v for v in d_s[m + 1:right0 + 1] if v <= ref_cap])
 
-        if len(ref_candidates) >= 5:
-            local_ref = float(np.percentile(ref_candidates, 80))
-        elif len(ref_candidates) > 0:
-            local_ref = float(np.median(ref_candidates))
-        else:
-            # No adjacent reference at all → cannot establish a reliable baseline
+        if not ref_candidates:
+            # Neither side has an established-enough run of the branch's own
+            # caliber to trust as a reference — rather than fall back to a
+            # contaminated or arbitrary value, skip this lesion.
             continue
+
+        local_ref = (float(np.percentile(ref_candidates, 80)) if len(ref_candidates) >= 5
+                    else float(np.median(ref_candidates)))
 
         if local_ref <= 1e-6:
             continue
@@ -778,13 +803,6 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
             R += 1
 
         if (R - L + 1) < cfg.min_lesion_points:
-            continue
-
-        # Skip minima within 5 pts of branch endpoints — these are junction/endpoint
-        # pixels where the vessel geometry changes abruptly and measurements are
-        # unreliable (skeleton degree transitions, natural tapering at tips).
-        edge_margin = max(5, cfg.min_lesion_points)
-        if m < edge_margin or m > N - 1 - edge_margin:
             continue
 
         # DT-based diameter at this exact original-branch point (no smoothing).

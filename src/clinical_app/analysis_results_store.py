@@ -19,7 +19,7 @@ import cv2
 
 import pdf_report
 from qca import QCAConfig
-from report_engine import AngleResult, generate_reasoning
+from report_engine import AngleResult, draw_angle_summary_bgr, draw_frame_stenosis_only, generate_reasoning
 
 
 def _sanitize(name: str) -> str:
@@ -40,6 +40,15 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
                                so the final combined report can embed it later
                                without needing the original frames/masks kept
                                around.
+      - key_frame_N.png     -- the smallest set of frames that shows every
+                               significant stenosis at least once (see
+                               select_key_frames), each as a plain frame with
+                               a circle + short id per lesion -- no vessel
+                               mask/skeleton, since these are that exact
+                               frame's own detections and always accurately
+                               placed -- so the analyst can see the
+                               strongest evidence for each detection without
+                               re-running analysis.
       - view_report.pdf     -- the per-view explainable report (crops,
                                heatmaps, diameter profiles, reasoning text),
                                via the existing multi-view PDF renderer
@@ -57,7 +66,7 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
     if angle_result.tracks and angle_result.summary_frame_idx is not None:
         rec = angle_result.get_frame_record(angle_result.summary_frame_idx)
         if rec is not None:
-            vis_bgr = pdf_report._draw_angle_summary_bgr(rec, angle_result.tracks)
+            vis_bgr = draw_angle_summary_bgr(rec, angle_result.tracks)
             image_name = "summary_overlay.png"
             cv2.imwrite(str(view_dir / image_name), vis_bgr)
 
@@ -66,6 +75,16 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
                 t = track_of_lesion.get(id(les))
                 if t is not None:
                     co_visible_ids.add(t.track_id)
+
+    key_frame_images = []
+    for idx in angle_result.key_frame_indices:
+        rec = angle_result.get_frame_record(idx)
+        if rec is None:
+            continue
+        vis_bgr = draw_frame_stenosis_only(rec, angle_result.tracks)
+        name = f"key_frame_{idx}.png"
+        cv2.imwrite(str(view_dir / name), vis_bgr)
+        key_frame_images.append({"frame_idx": idx, "image": name})
 
     lesions_json = []
     for t in angle_result.tracks:
@@ -95,6 +114,7 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
         "n_frames_analyzed": angle_result.n_frames_analyzed,
         "has_localization": angle_result.has_localization,
         "summary_image": image_name,
+        "key_frame_images": key_frame_images,
         "lesions": lesions_json,
     }
     (view_dir / "results.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

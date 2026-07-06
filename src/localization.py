@@ -1,6 +1,9 @@
 import numpy as np
 
-from localization_labels import segment_artery, segment_group, segment_label
+from localization_labels import (
+    merged_segment_artery, merged_segment_group, merged_segment_label,
+    segment_artery, segment_group, segment_label,
+)
 
 
 def anatomy_logits_to_map_and_confidence(anatomy_logits):
@@ -29,12 +32,20 @@ def anatomy_logits_to_map_and_confidence(anatomy_logits):
     return class_map, confidence
 
 
-def localize_point(class_map, confidence_map, point_yx, radius=7):
+def localize_point(class_map, confidence_map, point_yx, radius=7, use_merged=False):
     """
     Localize a point to the dominant non-background segment in a local window.
 
+    `use_merged` selects the label scheme: False for the raw 26-class SYNTAX
+    ids (MultiTaskMobileUNetv3), True for the 15-class merged ids produced by
+    MaskLocalizationNet (see localization_labels.py).
+
     Returns a dict with segment_id, label, artery, group, and confidence.
     """
+    label_fn = merged_segment_label if use_merged else segment_label
+    artery_fn = merged_segment_artery if use_merged else segment_artery
+    group_fn = merged_segment_group if use_merged else segment_group
+
     y, x = int(point_yx[0]), int(point_yx[1])
     h, w = class_map.shape
     y1, y2 = max(0, y - radius), min(h, y + radius + 1)
@@ -60,14 +71,14 @@ def localize_point(class_map, confidence_map, point_yx, radius=7):
 
     return {
         "segment_id": segment_id,
-        "label": segment_label(segment_id),
-        "artery": segment_artery(segment_id),
-        "group": segment_group(segment_id),
+        "label": label_fn(segment_id),
+        "artery": artery_fn(segment_id),
+        "group": group_fn(segment_id),
         "confidence": confidence,
     }
 
 
-def localize_lesions(lesions, class_map, confidence_map, radius=7):
+def localize_lesions(lesions, class_map, confidence_map, radius=7, use_merged=False):
     """Attach anatomical localization dicts to QCA lesion dictionaries."""
     localized = []
     for lesion in lesions:
@@ -77,6 +88,7 @@ def localize_lesions(lesions, class_map, confidence_map, radius=7):
             confidence_map,
             lesion["min_pt"],
             radius=radius,
+            use_merged=use_merged,
         )
         localized.append(enriched)
     return localized

@@ -54,6 +54,9 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.pth"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.onnx"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_best.onnx"),
@@ -147,6 +150,7 @@ class VideoThread(QThread):
             branches, lesions, dt, bw = run_qca_frame(
                 original_gray, mask_binary, self._qca_cfg,
                 class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+                use_merged_labels=(self._loc_model.use_merged_labels if self._loc_model is not None else False),
             )
 
             if not branches:
@@ -263,7 +267,7 @@ class VideoThread(QThread):
             ):
                 try:
                     self._loc_class_map, self._loc_confidence_map = run_localization_frame(
-                        self._loc_model, img_rgb_enhanced
+                        self._loc_model, img_rgb_enhanced, mask_binary
                     )
                 except Exception as e:
                     self.error.emit(f"Localization inference error: {e}")

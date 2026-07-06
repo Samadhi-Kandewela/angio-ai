@@ -18,8 +18,9 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
-from qca import QCAConfig, draw_overlay
+from qca import QCAConfig
 from frame_pipeline import preprocess_frame, segment_frame, run_localization_frame, run_qca_frame
+from report_engine import draw_live_stenosis_overlay
 
 
 class DicomAnalysisThread(QThread):
@@ -27,6 +28,12 @@ class DicomAnalysisThread(QThread):
     frame_ready = Signal(np.ndarray, np.ndarray, np.ndarray, int, int, float, str)
     playback_finished = Signal()
     error = Signal(str)
+
+    # While playing, QCA (stenosis detection) only re-runs every Nth frame --
+    # it's the expensive part of the pipeline and doesn't need to update
+    # faster than a person can read it. Seeking/stepping always re-runs it
+    # immediately for that exact frame, regardless of this interval.
+    STENOSIS_FRAME_INTERVAL = 5
 
     def __init__(self):
         super().__init__()
@@ -47,12 +54,19 @@ class DicomAnalysisThread(QThread):
         self._loc_class_map = None
         self._loc_confidence_map = None
 
+        self._frames_since_qca = 0
+        self._last_qca_vis_rgb = None
+        self._last_info = None
+
     # ── Control API (safe to call from the UI thread) ──────────────
     def set_frames(self, frames):
         self.frames = frames
         self._index = 0
         self._loc_class_map = None
         self._loc_confidence_map = None
+        self._frames_since_qca = 0
+        self._last_qca_vis_rgb = None
+        self._last_info = None
 
     def play(self):
         self._playing = True
@@ -108,15 +122,10 @@ class DicomAnalysisThread(QThread):
             if self.loc_model is not None:
                 try:
                     self._loc_class_map, self._loc_confidence_map = run_localization_frame(
-                        self.loc_model, img_rgb_enhanced
+                        self.loc_model, img_rgb_enhanced, mask_binary
                     )
                 except Exception:
                     self._loc_class_map, self._loc_confidence_map = None, None
-
-            branches, lesions, dt, bw = run_qca_frame(
-                img_gray, mask_binary, self.qca_cfg,
-                class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
-            )
 
             overlay = img_rgb_original.copy()
             color = np.array(self.overlay_color, dtype=np.uint8)
@@ -125,25 +134,51 @@ class DicomAnalysisThread(QThread):
                 overlay, self.overlay_alpha, img_rgb_original, 1.0 - self.overlay_alpha, 0
             )
 
-            if branches:
-                qca_vis_bgr = draw_overlay(img_gray, bw, branches, lesions)
-                qca_vis_rgb = cv2.cvtColor(qca_vis_bgr, cv2.COLOR_BGR2RGB)
-                if lesions:
-                    top = lesions[0]
-                    loc_text = ""
-                    if "localization" in top:
-                        loc = top["localization"]
-                        loc_text = f"  Location={loc['group']} ({loc['label']})  LocConf={loc['confidence']:.2f}"
-                    info = (
-                        f"Top Lesion: DS={top['DS_percent']:.1f}%  Severity={top['severity']}  "
-                        f"MLD={top['MLD_px']:.1f}px  RVD={top['RVD_px']:.1f}px{loc_text}  "
-                        f"| Total Lesions: {len(lesions)} across {len(branches)} branches"
-                    )
+            # QCA (skeletonization + lesion detection) is the expensive part of the
+            # pipeline, so during continuous Play it only re-runs every
+            # STENOSIS_FRAME_INTERVAL frames -- the stenosis panel holds its last
+            # rendered result in between. Seeking/stepping (not self._playing)
+            # always re-runs it immediately for that exact frame.
+            run_qca_now = (
+                not self._playing
+                or self._frames_since_qca >= self.STENOSIS_FRAME_INTERVAL - 1
+                or self._last_qca_vis_rgb is None
+            )
+
+            if run_qca_now:
+                self._frames_since_qca = 0
+                branches, lesions, dt, bw = run_qca_frame(
+                    img_gray, mask_binary, self.qca_cfg,
+                    class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+                    use_merged_labels=(self.loc_model.use_merged_labels if self.loc_model is not None else False),
+                )
+
+                if branches:
+                    qca_vis_bgr = draw_live_stenosis_overlay(img_gray, bw, branches, lesions)
+                    qca_vis_rgb = cv2.cvtColor(qca_vis_bgr, cv2.COLOR_BGR2RGB)
+                    if lesions:
+                        top = lesions[0]
+                        loc_text = ""
+                        if "localization" in top:
+                            loc = top["localization"]
+                            loc_text = f"  Location={loc['group']} ({loc['label']})  LocConf={loc['confidence']:.2f}"
+                        info = (
+                            f"Top Lesion: DS={top['DS_percent']:.1f}%  Severity={top['severity']}  "
+                            f"MLD={top['MLD_px']:.1f}px  RVD={top['RVD_px']:.1f}px{loc_text}  "
+                            f"| Total Lesions: {len(lesions)} across {len(branches)} branches"
+                        )
+                    else:
+                        info = f"No stenosis detected | {len(branches)} branches analyzed"
                 else:
-                    info = f"No stenosis detected | {len(branches)} branches analyzed"
+                    qca_vis_rgb = mask_overlay_rgb.copy()
+                    info = "QCA: Insufficient mask data for analysis"
+
+                self._last_qca_vis_rgb = qca_vis_rgb
+                self._last_info = info
             else:
-                qca_vis_rgb = mask_overlay_rgb.copy()
-                info = "QCA: Insufficient mask data for analysis"
+                self._frames_since_qca += 1
+                qca_vis_rgb = self._last_qca_vis_rgb
+                info = self._last_info
 
             latency_ms = (time.perf_counter() - t0) * 1000.0
             self.frame_ready.emit(

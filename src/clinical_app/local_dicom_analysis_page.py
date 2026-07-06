@@ -10,6 +10,8 @@ diagnostic aid, not the primary read.
 import os
 from pathlib import Path
 
+import cv2
+
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap, QFont
 from PySide6.QtWidgets import (
@@ -23,7 +25,7 @@ import analysis_results_store
 from dicom_loader import discover_series, load_series_frames
 from dicom_analysis_thread import DicomAnalysisThread
 from frame_pipeline import SegmentationModel, LocalizationModel
-from report_engine import analyze_frame_list
+from report_engine import KEY_FRAME_MAX_COUNT, analyze_frame_list, draw_frame_stenosis_only
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # angio-ai/
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
@@ -31,6 +33,8 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     PROJECT_ROOT / "checkpoints" / "mobileunetv3" / "mobileunetv3_augmented_best.pth",
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "best.pth",
+    PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "latest.pth",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.onnx",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.pth",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_best.onnx",
@@ -129,9 +133,12 @@ class LocalDicomAnalysisPage(QWidget):
         self._series_frames = []  # loaded BGR frames for the selected series
         self._series_load_thread = None
         self._view_analysis_thread = None
+        self._view_analysis_is_preview_only = False
         self._pending_case_id = None
         self._last_view_report = None
         self._last_final_report = None
+        self._current_angle_result = None
+        self._current_key_frame_page = 0
         self.analysis_thread = DicomAnalysisThread()
         self.analysis_thread.frame_ready.connect(self._on_frame_ready)
         self.analysis_thread.playback_finished.connect(self._on_playback_finished)
@@ -175,6 +182,7 @@ class LocalDicomAnalysisPage(QWidget):
         layout.addWidget(self._build_model_card())
         layout.addWidget(self._build_viewer_card())
         layout.addWidget(self._build_playback_card())
+        layout.addWidget(self._build_key_frames_card())
         layout.addWidget(self._build_save_report_card())
 
     def _build_selection_card(self) -> QFrame:
@@ -319,7 +327,7 @@ class LocalDicomAnalysisPage(QWidget):
 
         label = QLabel("No frame loaded")
         label.setAlignment(Qt.AlignCenter)
-        label.setMinimumSize(300, 260)
+        label.setMinimumSize(520, 460)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         label.setStyleSheet("background-color: #0B0C0E; border-radius: 6px; color: #5C6067;")
         v.addWidget(label, stretch=1)
@@ -443,6 +451,222 @@ class LocalDicomAnalysisPage(QWidget):
 
         return card
 
+    def _build_key_frames_card(self) -> QFrame:
+        card = _card()
+        v = QVBoxLayout(card)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+
+        header = QLabel("KEY FRAMES — EVIDENCE FOR EVERY FINDING")
+        header.setProperty("role", "sectionHeader")
+        v.addWidget(header)
+
+        hint = QLabel(
+            "Analyzed automatically once playback reaches the end of the series -- the smallest set "
+            f"of frames (up to {KEY_FRAME_MAX_COUNT}) that shows every significant stenosis at least "
+            "once, picked by vessel opacification quality, so every finding has real supporting "
+            "evidence. Each picture shows only the original frame with a circle + short id (e.g. "
+            "\"L1\") around its own stenosis -- no vessel mask or skeleton -- since these are this "
+            "exact frame's own detections, always accurately placed."
+        )
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        self.lbl_key_frame_coverage = QLabel("Play through the series once to see key frames here.")
+        self.lbl_key_frame_coverage.setProperty("role", "hint")
+        self.lbl_key_frame_coverage.setWordWrap(True)
+        v.addWidget(self.lbl_key_frame_coverage)
+
+        nav_row = QHBoxLayout()
+        self.btn_prev_key_frame = QPushButton("◀ Previous")
+        self.btn_prev_key_frame.clicked.connect(self._go_prev_key_frame)
+        self.btn_prev_key_frame.setEnabled(False)
+        nav_row.addWidget(self.btn_prev_key_frame)
+
+        self.lbl_key_frame_position = QLabel("No key frames yet")
+        self.lbl_key_frame_position.setAlignment(Qt.AlignCenter)
+        self.lbl_key_frame_position.setFont(QFont("Consolas", 10, QFont.Bold))
+        nav_row.addWidget(self.lbl_key_frame_position, stretch=1)
+
+        self.btn_next_key_frame = QPushButton("Next ▶")
+        self.btn_next_key_frame.clicked.connect(self._go_next_key_frame)
+        self.btn_next_key_frame.setEnabled(False)
+        nav_row.addWidget(self.btn_next_key_frame)
+        v.addLayout(nav_row)
+
+        box, unlabeled_image, labeled_image, caption_label = self._build_key_frame_panel_contents()
+        self._kf_unlabeled_image = unlabeled_image
+        self._kf_labeled_image = labeled_image
+        self._kf_caption = caption_label
+        v.addWidget(box)
+
+        return card
+
+    def _build_key_frame_panel_contents(self):
+        box = _card()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(8)
+
+        images_row = QHBoxLayout()
+        images_row.setSpacing(14)
+
+        unlabeled_col = QVBoxLayout()
+        unlabeled_sub = QLabel("Original (unlabeled)")
+        unlabeled_sub.setProperty("role", "hint")
+        unlabeled_col.addWidget(unlabeled_sub)
+        unlabeled_image = QLabel("No frame yet")
+        unlabeled_image.setAlignment(Qt.AlignCenter)
+        unlabeled_image.setFixedSize(460, 420)
+        unlabeled_image.setStyleSheet("background-color: #0B0C0E; border-radius: 6px; color: #5C6067;")
+        unlabeled_col.addWidget(unlabeled_image)
+        images_row.addLayout(unlabeled_col)
+
+        labeled_col = QVBoxLayout()
+        labeled_sub = QLabel("Stenosis found")
+        labeled_sub.setProperty("role", "hint")
+        labeled_col.addWidget(labeled_sub)
+        labeled_image = QLabel("No frame yet")
+        labeled_image.setAlignment(Qt.AlignCenter)
+        labeled_image.setFixedSize(460, 420)
+        labeled_image.setStyleSheet("background-color: #0B0C0E; border-radius: 6px; color: #5C6067;")
+        labeled_col.addWidget(labeled_image)
+        images_row.addLayout(labeled_col)
+
+        v.addLayout(images_row)
+
+        caption_label = QLabel("")
+        caption_label.setWordWrap(True)
+        caption_label.setFont(QFont("Consolas", 10))
+        caption_label.setProperty("role", "hint")
+        v.addWidget(caption_label)
+
+        return box, unlabeled_image, labeled_image, caption_label
+
+    def _format_key_frame_caption(self, rec, angle_result) -> str:
+        """Full detail (severity, DS%, MLD/RVD, confidence, location) for every
+        significant lesion found on this exact frame -- more detail than a
+        one-line summary since this is the only place a cardiologist sees a
+        single lesion's full measurement next to its image."""
+        track_of_lesion = {id(les): t for t in angle_result.tracks for les in t.detections}
+        seen_ids = set()
+        lines = [f"Frame {rec.frame_idx + 1} / {angle_result.n_frames_total}"]
+
+        for les in rec.lesions:
+            t = track_of_lesion.get(id(les))
+            if t is None or t.track_id in seen_ids:
+                continue
+            rep = t.representative
+            if rep["severity"] not in ("SEVERE", "SIGNIFICANT"):
+                continue
+            seen_ids.add(t.track_id)
+
+            if rep.get("MLD_mm") is not None:
+                mld, rvd, unit = rep["MLD_mm"], rep["RVD_mm"], "mm"
+            else:
+                mld, rvd, unit = rep["MLD_px"], rep["RVD_px"], "px"
+
+            where = f"{t.label} ({t.artery})" if t.artery != "unknown" else "location unknown"
+            occ = "  [TOTAL OCCLUSION]" if rep.get("total_occlusion") else ""
+            conf = rep.get("confidence")
+            conf_part = f"   Confidence: {conf:.2f}" if conf is not None else ""
+
+            lines.append(
+                f"\n{t.track_id} — {rep['severity']} — {rep['DS_percent']:.0f}% diameter stenosis{occ}\n"
+                f"    Location: {where}\n"
+                f"    MLD: {mld:.1f} {unit}   RVD: {rvd:.1f} {unit}{conf_part}"
+            )
+
+        if len(lines) == 1:
+            lines.append("\nNo significant stenosis at this frame.")
+
+        return "\n".join(lines)
+
+    def _render_current_key_frame(self):
+        result = self._current_angle_result
+        if result is None or not result.key_frame_indices:
+            self._kf_unlabeled_image.setPixmap(QPixmap())
+            self._kf_unlabeled_image.setText("No frame yet")
+            self._kf_labeled_image.setPixmap(QPixmap())
+            self._kf_labeled_image.setText("No frame yet")
+            self._kf_caption.setText("")
+            self.lbl_key_frame_position.setText("No key frames yet")
+            self.btn_prev_key_frame.setEnabled(False)
+            self.btn_next_key_frame.setEnabled(False)
+            return
+
+        n = len(result.key_frame_indices)
+        self._current_key_frame_page = max(0, min(self._current_key_frame_page, n - 1))
+        idx = result.key_frame_indices[self._current_key_frame_page]
+        rec = result.get_frame_record(idx)
+
+        self.lbl_key_frame_position.setText(f"Key Frame {self._current_key_frame_page + 1} of {n}")
+        self.btn_prev_key_frame.setEnabled(self._current_key_frame_page > 0)
+        self.btn_next_key_frame.setEnabled(self._current_key_frame_page < n - 1)
+
+        if rec is None:
+            self._kf_unlabeled_image.setText("No frame data")
+            self._kf_labeled_image.setText("No frame data")
+            self._kf_caption.setText("")
+            return
+
+        self._kf_unlabeled_image.setPixmap(ndarray_to_qpixmap(
+            rec.img_rgb, self._kf_unlabeled_image.width(), self._kf_unlabeled_image.height()
+        ))
+
+        vis_bgr = draw_frame_stenosis_only(rec, result.tracks)
+        vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+        self._kf_labeled_image.setPixmap(ndarray_to_qpixmap(
+            vis_rgb, self._kf_labeled_image.width(), self._kf_labeled_image.height()
+        ))
+
+        self._kf_caption.setText(self._format_key_frame_caption(rec, result))
+
+    def _go_prev_key_frame(self):
+        self._current_key_frame_page -= 1
+        self._render_current_key_frame()
+
+    def _go_next_key_frame(self):
+        self._current_key_frame_page += 1
+        self._render_current_key_frame()
+
+    def _update_key_frames(self, angle_result):
+        self._current_angle_result = angle_result
+        self._current_key_frame_page = 0
+        self._render_current_key_frame()
+
+        significant_tracks = [
+            t for t in angle_result.tracks if t.representative["severity"] in ("SEVERE", "SIGNIFICANT")
+        ]
+        if not significant_tracks:
+            self.lbl_key_frame_coverage.setText("No significant stenosis found across this series.")
+            return
+
+        track_of_lesion = {id(les): t for t in angle_result.tracks for les in t.detections}
+        covered_ids = set()
+        for idx in angle_result.key_frame_indices:
+            rec = angle_result.get_frame_record(idx)
+            if rec is None:
+                continue
+            for les in rec.lesions:
+                t = track_of_lesion.get(id(les))
+                if t is not None and t.representative["severity"] in ("SEVERE", "SIGNIFICANT"):
+                    covered_ids.add(t.track_id)
+
+        n_total = len(significant_tracks)
+        n_covered = len({t.track_id for t in significant_tracks} & covered_ids)
+        if n_covered >= n_total:
+            self.lbl_key_frame_coverage.setText(
+                f"{len(angle_result.key_frame_indices)} key frame(s) found, covering all {n_total} significant finding(s)."
+            )
+        else:
+            self.lbl_key_frame_coverage.setText(
+                f"{len(angle_result.key_frame_indices)} key frame(s) found, covering {n_covered}/{n_total} "
+                f"significant finding(s) -- some findings never co-occurred with others within the "
+                f"{KEY_FRAME_MAX_COUNT}-frame cap."
+            )
+
     # ── Case / series selection ─────────────────────────────────────
     def refresh_cases(self):
         self._cases = patient_store.list_cases()
@@ -517,6 +741,11 @@ class LocalDicomAnalysisPage(QWidget):
         self._set_playback_enabled(self.analysis_thread.seg_model is not None)
         if self.analysis_thread.seg_model is not None:
             self.analysis_thread.seek(0)
+
+        self._current_angle_result = None
+        self._current_key_frame_page = 0
+        self._render_current_key_frame()
+        self.lbl_key_frame_coverage.setText("Play through the series once to see key frames here.")
 
     def _on_series_load_error(self, message: str):
         self.btn_load_series.setEnabled(True)
@@ -601,6 +830,37 @@ class LocalDicomAnalysisPage(QWidget):
     def _on_playback_finished(self):
         self.btn_play.setEnabled(True)
         self.btn_pause.setEnabled(False)
+        self._auto_run_key_frame_preview()
+
+    def _auto_run_key_frame_preview(self):
+        """
+        Runs the same whole-series analysis as "Save Results & Generate View
+        Report" automatically once playback reaches the end, so Key Frames
+        populates without an extra click. Unlike that button, this does NOT
+        write anything to disk or prompt for a view label -- it's a live
+        preview only; saving the PDF/results.json is still a deliberate,
+        separate action via the Save & Report card.
+        """
+        if self._view_analysis_thread is not None and self._view_analysis_thread.isRunning():
+            return
+        if not self._series_frames or self.analysis_thread.seg_model is None:
+            return
+
+        row = self.list_series.currentRow()
+        label = self._series[row].description if 0 <= row < len(self._series) else "View"
+
+        self._view_analysis_is_preview_only = True
+        self.lbl_key_frame_coverage.setText("Analyzing full series for key frames...")
+
+        self._view_analysis_thread = _ViewAnalysisThread(
+            list(self._series_frames), label,
+            self.analysis_thread.seg_model, self.analysis_thread.loc_model,
+            self.analysis_thread.qca_cfg, self.analysis_thread.threshold,
+        )
+        self._view_analysis_thread.progress.connect(self.lbl_key_frame_coverage.setText)
+        self._view_analysis_thread.finished_ok.connect(self._on_view_analysis_finished)
+        self._view_analysis_thread.error.connect(self._on_view_analysis_error)
+        self._view_analysis_thread.start()
 
     def _on_analysis_error(self, message: str):
         self.lbl_stenosis.setStyleSheet("color: #E5484D; font-weight: bold;")
@@ -676,6 +936,7 @@ class LocalDicomAnalysisPage(QWidget):
         label = label.strip() or default_label
 
         self._pending_case_id = case["case_id"]
+        self._view_analysis_is_preview_only = False
         self.btn_open_view_report.setVisible(False)
         self._set_save_busy(True)
         self.lbl_save_status.setText(f"Analyzing full series for '{label}'...")
@@ -691,6 +952,11 @@ class LocalDicomAnalysisPage(QWidget):
         self._view_analysis_thread.start()
 
     def _on_view_analysis_finished(self, angle_result):
+        self._update_key_frames(angle_result)
+
+        if self._view_analysis_is_preview_only:
+            return  # auto preview after playback -- key frames only, no disk save/prompt
+
         case_id = self._pending_case_id
         analysis_dir = patient_store.get_case_analysis_dir(case_id)
         patient_info = patient_store.load_metadata(case_id)
@@ -716,6 +982,9 @@ class LocalDicomAnalysisPage(QWidget):
         self._refresh_final_report_status()
 
     def _on_view_analysis_error(self, message: str):
+        if self._view_analysis_is_preview_only:
+            self.lbl_key_frame_coverage.setText(f"Key frame preview failed: {message}")
+            return
         self._set_save_busy(False)
         self.lbl_save_status.setText(f"Analysis failed: {message}")
         QMessageBox.warning(self, "Analysis Failed", message)

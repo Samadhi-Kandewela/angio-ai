@@ -71,6 +71,39 @@ class FrameRecord:
     lesions: list  # lesion dicts, each carries a "frame_idx" key
 
 
+# Absolute confidence floor (on the qca.py detect_lesions_on_branch scale --
+# a 0.5/0.3/0.2-weighted composite of edge sharpness, reference-segment
+# quality, and lesion-span stability, roughly in [0, 1]) a detection must
+# clear to be eligible as a track's representative measurement. Chosen well
+# below what a normally-measured frame scores (typically ~0.5-0.9 in
+# practice) but clearly above a noisy/degenerate reading, so it excludes
+# only genuine outliers rather than any frame merely less confident than the
+# track's single best one -- see _pick_representative.
+REPRESENTATIVE_CONFIDENCE_FLOOR = 0.4
+
+
+def _pick_representative(detections: list) -> dict:
+    """
+    Picks the one detection used everywhere as a lesion track's reported
+    measurement (severity, DS%, MLD/RVD, location...): the most severe
+    (highest DS%) reading among this track's *reliably-measured* detections
+    -- not simply the single highest-confidence one. Confidence reflects
+    measurement quality (edge sharpness, reference-segment quality), not
+    severity, so the cleanest-measured frame can catch the vessel at a less-
+    narrowed point in the cardiac cycle than a slightly-less-confident frame
+    did -- picking by confidence alone can then under-report a lesion's true
+    worst reading. Detections below REPRESENTATIVE_CONFIDENCE_FLOOR are
+    excluded so a noisy, low-confidence outlier can't win purely by reading
+    falsely severe; if every detection falls below it (a weakly-measured
+    track throughout), the least-unreliable one is used rather than
+    reporting nothing.
+    """
+    eligible = [d for d in detections if d.get("confidence", 0.0) >= REPRESENTATIVE_CONFIDENCE_FLOOR]
+    if not eligible:
+        eligible = [max(detections, key=lambda d: d.get("confidence", 0.0))]
+    return max(eligible, key=lambda d: d["DS_percent"])
+
+
 @dataclass
 class LesionTrack:
     track_id: str
@@ -81,7 +114,7 @@ class LesionTrack:
 
     @property
     def representative(self) -> dict:
-        return max(self.detections, key=lambda d: d.get("confidence", 0.0))
+        return _pick_representative(self.detections)
 
     @property
     def frame_indices(self):
@@ -94,6 +127,7 @@ class _TrackCandidate:
     _update_track_candidates) -- not the final, reported LesionTrack; only
     candidates whose peak_score clears TRACK_CONFIRM_SCORE become one."""
     segment_id: Optional[int]
+    artery: Optional[str]
     last_pos: Tuple[float, float]
     score: float
     peak_score: float
@@ -254,9 +288,19 @@ def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, h
     within TRACK_BOX_TOLERANCE_PX of that candidate's last known position (a
     bounding box sized to tolerate how much a lesion's apparent position
     shifts frame-to-frame with the cardiac cycle), and -- when a
-    localization model is available -- sharing its anatomical segment, so
-    two different vessels that happen to cross close together in this 2D
+    localization model is available -- sharing its anatomical artery, so two
+    different vessels that happen to cross close together in this 2D
     projection don't get matched to each other.
+
+    Gating on the *artery family* (e.g. "RCA") rather than the exact SYNTAX
+    segment id is deliberate: the localization model can flip between two
+    adjacent segments of the same vessel frame-to-frame for one real lesion
+    that straddles (or sits near) the segment boundary (e.g. proximal vs mid
+    RCA) -- an exact-segment veto would fragment that single lesion into two
+    separate tracks. Two genuinely distinct lesions on the same artery
+    (tandem stenoses) are still kept apart because they're expected to sit
+    well outside TRACK_BOX_TOLERANCE_PX of each other -- the spatial gate
+    below, not the anatomical one, is what actually separates those.
 
     This is what actually fixes false positives: a detection that only ever
     appears in one or two frames (segmentation noise, a stray branch
@@ -273,15 +317,16 @@ def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, h
     for les in lesions:
         loc = les.get("localization")
         seg_id = loc["segment_id"] if (has_localization and loc) else None
+        artery = loc["artery"] if (has_localization and loc) else None
         y, x = les["min_pt"]
 
         best_i, best_dist = None, None
         for i, cand in enumerate(candidates):
             if i in matched_indices:
                 continue  # one detection per candidate per frame
-            if has_localization and seg_id is not None and cand.segment_id is not None \
-                    and cand.segment_id != seg_id:
-                continue
+            if (has_localization and artery not in (None, "unknown")
+                    and cand.artery not in (None, "unknown") and cand.artery != artery):
+                continue  # different artery family -- definitely not the same lesion
             cy, cx = cand.last_pos
             dist = ((cy - y) ** 2 + (cx - x) ** 2) ** 0.5
             if dist <= TRACK_BOX_TOLERANCE_PX and (best_dist is None or dist < best_dist):
@@ -291,6 +336,8 @@ def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, h
             cand = candidates[best_i]
             cand.detections.append(les)
             cand.last_pos = (y, x)
+            if cand.artery in (None, "unknown") and artery not in (None, "unknown"):
+                cand.artery = artery  # adopt a real artery once one becomes known
             cand.score += TRACK_HIT_SCORE
             cand.peak_score = max(cand.peak_score, cand.score)
             matched_indices.add(best_i)
@@ -304,9 +351,11 @@ def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, h
     for les in unmatched_lesions:
         loc = les.get("localization")
         seg_id = loc["segment_id"] if (has_localization and loc) else None
+        artery = loc["artery"] if (has_localization and loc) else None
         y, x = les["min_pt"]
         candidates.append(_TrackCandidate(
-            segment_id=seg_id, last_pos=(y, x), score=TRACK_HIT_SCORE, peak_score=TRACK_HIT_SCORE,
+            segment_id=seg_id, artery=artery, last_pos=(y, x),
+            score=TRACK_HIT_SCORE, peak_score=TRACK_HIT_SCORE,
             detections=[les],
         ))
 
@@ -325,7 +374,7 @@ def _finalize_tracks(candidates: List[_TrackCandidate], has_localization: bool) 
         if cand.peak_score < TRACK_CONFIRM_SCORE:
             continue
 
-        rep = max(cand.detections, key=lambda d: d.get("confidence", 0.0))
+        rep = _pick_representative(cand.detections)
         if has_localization and "localization" in rep:
             loc = rep["localization"]
             label, artery, group = loc["label"], loc["artery"], loc["group"]
@@ -350,6 +399,13 @@ def _finalize_tracks(candidates: List[_TrackCandidate], has_localization: bool) 
 # injection, "ink" not yet spread) could win purely on an incidental lesion
 # coincidence while looking washed-out and largely vessel-free.
 MIN_VESSEL_COVERAGE_FRACTION = 0.7
+
+# Same idea for select_key_frames's frame pool: a lower bar than the summary
+# diagram's (0.7) since key frames are picked per-track rather than one frame
+# for the whole angle, so slightly less pressure to demand the single best
+# frame in the run -- but still excludes washed-out frames from being chosen
+# just because they happen to be the sole frame bundling several lesions.
+MIN_KEY_FRAME_COVERAGE_FRACTION = 0.6
 
 
 def _vessel_coverage(rec: FrameRecord) -> int:
@@ -412,13 +468,18 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
     more distinct significant lesions than frames picked could otherwise
     silently drop some of them).
 
-    Each step picks the frame that covers the most not-yet-covered
+    Picks are drawn from well-opacified frames first (vessel coverage within
+    MIN_KEY_FRAME_COVERAGE_FRACTION of the run's best frame) -- a frame that
+    happens to be the only one showing several lesions at once but is
+    otherwise washed-out/hard-to-read is a poor key frame even though it's
+    technically sufficient, so it's only used as a fallback once the
+    well-opacified pool can't cover something. Within whichever pool is in
+    play, each step picks the frame that covers the most not-yet-covered
     significant tracks; ties (and any picks once everything is already
-    covered) are broken by vessel coverage, so frame quality still matters
-    wherever it doesn't conflict with coverage. Picks prefer to stay
-    >= min_gap frames apart (to avoid near-identical consecutive frames from
-    the same opacification peak), but will ignore that spacing if it's the
-    only way left to cover a remaining track.
+    covered) are broken by vessel coverage. Picks prefer to stay >= min_gap
+    frames apart (to avoid near-identical consecutive frames from the same
+    opacification peak), but will ignore that spacing if it's the only way
+    left to cover a remaining track.
 
     If there are no significant tracks at all (nothing to cover), falls back
     to the highest-coverage frames so the panel isn't empty.
@@ -439,28 +500,43 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
         frame_tracks[rec.frame_idx] = ids_here
 
     coverage = {rec.frame_idx: _vessel_coverage(rec) for rec in frame_records}
+    max_coverage = max(coverage.values(), default=0)
+    quality_floor = max_coverage * MIN_KEY_FRAME_COVERAGE_FRACTION
 
     picked: List[int] = []
     covered: set = set()
-    remaining = list(frame_records)
 
-    while remaining and len(picked) < max_count and covered != significant_ids:
-        # Coverage always wins: min_gap is only a tie-break among frames that
-        # would add the same number of new tracks, never a reason to exclude
-        # the one frame that happens to be the sole source of a still-missing
-        # track (excluding it outright can leave that track uncovered forever
-        # even with picks to spare under max_count).
-        def _score(rec):
-            new_tracks = len(frame_tracks[rec.frame_idx] - covered)
-            gap_ok = all(abs(rec.frame_idx - p) >= min_gap for p in picked)
-            return (new_tracks, int(gap_ok), coverage[rec.frame_idx])
+    def _greedy_fill(pool: List[FrameRecord]):
+        remaining = list(pool)
+        while remaining and len(picked) < max_count and covered != significant_ids:
+            # Coverage always wins: min_gap is only a tie-break among frames
+            # that would add the same number of new tracks, never a reason
+            # to exclude the one frame that happens to be the sole source of
+            # a still-missing track (excluding it outright can leave that
+            # track uncovered forever even with picks to spare under max_count).
+            def _score(rec):
+                new_tracks = len(frame_tracks[rec.frame_idx] - covered)
+                gap_ok = all(abs(rec.frame_idx - p) >= min_gap for p in picked)
+                return (new_tracks, int(gap_ok), coverage[rec.frame_idx])
 
-        best = max(remaining, key=_score)
-        if covered and _score(best)[0] == 0:
-            break  # nothing left would add new coverage -- stop spending picks
-        picked.append(best.frame_idx)
-        covered |= frame_tracks[best.frame_idx]
-        remaining.remove(best)
+            best = max(remaining, key=_score)
+            if covered and _score(best)[0] == 0:
+                break  # nothing left in this pool would add new coverage
+            picked.append(best.frame_idx)
+            covered.update(frame_tracks[best.frame_idx])
+            remaining.remove(best)
+
+    well_opacified = [rec for rec in frame_records if coverage[rec.frame_idx] >= quality_floor]
+    _greedy_fill(well_opacified)
+
+    if covered != significant_ids:
+        # Well-opacified frames alone couldn't cover everything -- fall back
+        # to the full frame set (including washed-out ones) only for
+        # whatever's still missing, so a real finding is never silently
+        # dropped for the sake of image quality.
+        washed_out = [rec for rec in frame_records if rec.frame_idx not in picked
+                     and coverage[rec.frame_idx] < quality_floor]
+        _greedy_fill(washed_out)
 
     if not picked:
         ranked = sorted(frame_records, key=_vessel_coverage, reverse=True)
@@ -486,6 +562,13 @@ def draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.nd
     not this single frame's own noisier per-frame reading. Shared by the PDF
     report and the in-app key-frames summary so the two never show different
     numbers for the same lesion.
+
+    Lesion spans are alpha-blended onto the frame rather than solid-filled, so
+    the vessel structure stays visible underneath instead of a hard-edged
+    color block, and labels use the same collision-avoiding placement as
+    draw_lesion_markers_bgr (see _find_label_box) with a halo + leader line --
+    with several lesions close together in one projection, naive fixed-offset
+    text quickly piles up into an unreadable overlap otherwise.
     """
     vis = cv2.cvtColor(rec.img_gray, cv2.COLOR_GRAY2BGR)
 
@@ -500,6 +583,8 @@ def draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.nd
     track_of_lesion = {id(les): t for t in tracks for les in t.detections}
     drawn_track_ids = set()
 
+    overlay = vis.copy()
+    specs = []
     for les in rec.lesions:
         t = track_of_lesion.get(id(les))
         if t is None or t.track_id in drawn_track_ids:
@@ -511,18 +596,53 @@ def draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.nd
         drawn_track_ids.add(t.track_id)
 
         color = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
-        radius = _SEVERITY_RADIUS.get(sev, 1)
+        radius = _SEVERITY_RADIUS.get(sev, 1) + 1
         branch = les["branch"]
         L, R = les["L_idx"], les["R_idx"]
+        xs, ys = [], []
         for i in range(L, min(R + 1, len(branch))):
             y, x = branch[i]
-            cv2.circle(vis, (x, y), radius, color, -1)
+            cv2.circle(overlay, (x, y), radius, color, -1)
+            xs.append(x)
+            ys.append(y)
 
         y0, x0 = les["min_pt"]
         occ = " [OCC]" if rep.get("total_occlusion") else ""
         label = f"{t.track_id} {rep['DS_percent']:.1f}% {sev[:3]}{occ}"
-        font_scale = 0.45 if sev == "SEVERE" else 0.38
-        cv2.putText(vis, label, (x0 + 6, y0 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA)
+        span_box = ((min(xs) - radius, min(ys) - radius, max(xs) + radius, max(ys) + radius)
+                   if xs else (x0 - radius, y0 - radius, x0 + radius, y0 + radius))
+        specs.append({
+            "center": (x0, y0), "color": color, "label": label,
+            "radius": radius, "span_box": span_box, "severity": sev,
+        })
+
+    # Blend the lesion-span highlight instead of overwriting pixels outright,
+    # so it reads as a highlight over the vessel, not a solid color block.
+    vis = cv2.addWeighted(overlay, 0.55, vis, 0.45, 0)
+
+    # Most severe first, so SEVERE lesions win the closest/cleanest label spot.
+    specs.sort(key=lambda s: 0 if s["severity"] == "SEVERE" else 1)
+    occupied = [s["span_box"] for s in specs]
+    font_scale = 0.5
+    for spec in specs:
+        x0, y0 = spec["center"]
+        color, label, radius = spec["color"], spec["label"], spec["radius"]
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+
+        box, anchor = _find_label_box((x0, y0), (tw, th + baseline), radius + 10, occupied, vis.shape)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = (int(v) for v in box)
+        occupied.append(box)
+
+        if anchor is not None and (abs(anchor[0] - x0) > radius + 20 or abs(anchor[1] - y0) > radius + 20):
+            cv2.line(vis, (x0, y0), (int(anchor[0]), int(anchor[1])), color, 1, cv2.LINE_AA)
+
+        tx, ty = x1 + 2, y2 - baseline - 2
+        for dx, dy in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)):
+            cv2.putText(vis, label, (tx + dx, ty + dy), cv2.FONT_HERSHEY_SIMPLEX,
+                       font_scale, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(vis, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA)
 
     return vis
 

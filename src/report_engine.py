@@ -11,7 +11,7 @@ angle's lesions simultaneously as possible, for the 2D overview diagram.
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -26,15 +26,32 @@ from frame_pipeline import (
 # preview (frame_pipeline / VideoThread use interval=15 to hold real-time FPS).
 LOC_FRAME_INTERVAL = 5
 
-# Fallback spatial clustering bucket size (pixels) used only when no
-# localization model is available to group detections by anatomical segment.
-SPATIAL_BUCKET_PX = 20
+# Online lesion tracking (see _update_track_candidates): a detection is matched
+# to an existing candidate track if it falls within this distance of the
+# candidate's last known position -- a bounding-box tolerance sized to absorb
+# how much a lesion's apparent position drifts frame-to-frame with the
+# cardiac cycle, without being so large that it conflates two nearby but
+# distinct lesions (e.g. tandem stenoses on the same vessel).
+TRACK_BOX_TOLERANCE_PX = 45
 
-# Anatomical segments (e.g. "mid LAD") can span a long stretch of vessel, long
-# enough to hold two separate real lesions (tandem/serial stenoses). Detections
-# that share a segment but sit farther apart than this are treated as distinct
-# lesions rather than collapsed into one track -- see _split_by_proximity.
-LESION_PROXIMITY_PX = 45
+# Marks awarded when a candidate track is matched again this frame, and
+# deducted when it isn't. A candidate that racks up a high score has been
+# seen again and again as the video plays -- a real lesion; one that only
+# ever flickers in for a frame or two (segmentation noise, a stray branch
+# crossing) never earns enough score to be reported.
+TRACK_HIT_SCORE = 2.0
+TRACK_MISS_PENALTY = 1.0
+
+# A candidate whose score falls this low is dropped immediately, freeing it
+# from matching further detections (instead of lingering and potentially
+# absorbing an unrelated later detection at a similar position).
+TRACK_DISCARD_SCORE = -3.0
+
+# A candidate must have reached at least this score at its peak -- not
+# necessarily its final score, since a real lesion can still rack up
+# misses late in the run as contrast washes out -- to be reported as a
+# confirmed lesion rather than discarded as a false positive.
+TRACK_CONFIRM_SCORE = 4.0
 
 # Key frames are picked to guarantee every SEVERE/SIGNIFICANT lesion track has
 # supporting evidence in at least one frame (see select_key_frames), capped at
@@ -72,6 +89,18 @@ class LesionTrack:
 
 
 @dataclass
+class _TrackCandidate:
+    """In-progress lesion track during the online scoring pass (see
+    _update_track_candidates) -- not the final, reported LesionTrack; only
+    candidates whose peak_score clears TRACK_CONFIRM_SCORE become one."""
+    segment_id: Optional[int]
+    last_pos: Tuple[float, float]
+    score: float
+    peak_score: float
+    detections: list = field(default_factory=list)
+
+
+@dataclass
 class AngleResult:
     angle_label: str
     video_path: str
@@ -98,15 +127,18 @@ def _analyze_frame_iterable(frame_iter, n_frames_total: int, angle_label: str, s
     """
     Shared whole-run QCA analysis loop: runs segmentation + QCA over every
     frame yielded by frame_iter. Only frames containing >=1 detected lesion
-    are retained in memory, then detections are clustered into per-lesion
-    tracks across the whole run. Used by both analyze_angle_video() (reads
-    from a video file) and analyze_frame_list() (an already-decoded list,
-    e.g. from a loaded DICOM series).
+    are retained in memory; detections are matched into per-lesion tracks
+    frame by frame as the loop runs (see _update_track_candidates), with a
+    hit/miss score that filters out transient false positives. Used by both
+    analyze_angle_video() (reads from a video file) and analyze_frame_list()
+    (an already-decoded list, e.g. from a loaded DICOM series).
     """
     frame_records: List[FrameRecord] = []
+    track_candidates: List[_TrackCandidate] = []
     loc_class_map = None
     loc_confidence_map = None
     frame_idx = 0
+    has_localization = loc_model is not None
 
     for frame in frame_iter:
         img_rgb_original, img_rgb_enhanced, img_batch, img_gray = preprocess_frame(frame)
@@ -134,12 +166,13 @@ def _analyze_frame_iterable(frame_iter, n_frames_total: int, angle_label: str, s
                 bw_mask=bw, dt=dt, branches=branches, lesions=lesions,
             ))
 
+        _update_track_candidates(track_candidates, lesions, has_localization)
+
         frame_idx += 1
         if progress_cb is not None:
             progress_cb(frame_idx, n_frames_total)
 
-    has_localization = loc_model is not None
-    tracks = build_lesion_tracks(frame_records, has_localization)
+    tracks = _finalize_tracks(track_candidates, has_localization)
     summary_frame_idx = select_summary_frame(tracks, frame_records)
     key_frame_indices = select_key_frames(frame_records, tracks)
 
@@ -207,74 +240,96 @@ def analyze_frame_list(frames: List[np.ndarray], angle_label: str,
     )
 
 
-def _track_key(les: dict, has_localization: bool):
-    """Clustering key for grouping the same anatomical lesion across frames."""
-    if has_localization and "localization" in les:
-        return ("segment", les["localization"]["segment_id"])
-    y, x = les["min_pt"]
-    return ("xy", int(y // SPATIAL_BUCKET_PX), int(x // SPATIAL_BUCKET_PX))
-
-
-def _split_by_proximity(detections: list, threshold_px: float) -> List[list]:
+def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, has_localization: bool) -> None:
     """
-    Greedily splits a list of same-segment detections into spatially distinct
-    groups: each detection joins the nearest existing group if within
-    threshold_px of that group's running centroid, otherwise it starts a new
-    group. Frame-to-frame jitter of the *same* physical lesion is much
-    smaller than this threshold, while two genuinely separate lesions (e.g.
-    tandem stenoses) that merely happen to share a broad anatomical segment
-    sit much farther apart -- so this recovers them as distinct lesions
-    instead of one track silently absorbing both.
+    Online lesion tracking with a hit/miss score, called once per analyzed
+    frame -- including frames with zero detections, so misses are counted
+    correctly. A detection is matched to the nearest existing candidate
+    within TRACK_BOX_TOLERANCE_PX of that candidate's last known position (a
+    bounding box sized to tolerate how much a lesion's apparent position
+    shifts frame-to-frame with the cardiac cycle), and -- when a
+    localization model is available -- sharing its anatomical segment, so
+    two different vessels that happen to cross close together in this 2D
+    projection don't get matched to each other.
+
+    This is what actually fixes false positives: a detection that only ever
+    appears in one or two frames (segmentation noise, a stray branch
+    crossing) never accumulates enough score to be confirmed (see
+    TRACK_CONFIRM_SCORE in _finalize_tracks), while a real lesion -- matched
+    again and again as the video plays -- quickly builds up a high score
+    even if it drops out for an occasional noisy frame. Mutates `candidates`
+    in place: appends newly-started candidates, and drops any whose score
+    has fallen to TRACK_DISCARD_SCORE or below.
     """
-    groups = []  # each: {"members": [...], "centroid": (y, x)}
-    for det in detections:
-        y, x = det["min_pt"]
-        best, best_dist = None, None
-        for g in groups:
-            cy, cx = g["centroid"]
-            d = ((cy - y) ** 2 + (cx - x) ** 2) ** 0.5
-            if d <= threshold_px and (best_dist is None or d < best_dist):
-                best, best_dist = g, d
-        if best is not None:
-            best["members"].append(det)
-            n = len(best["members"])
-            cy, cx = best["centroid"]
-            best["centroid"] = (cy + (y - cy) / n, cx + (x - cx) / n)
+    matched_indices = set()
+    unmatched_lesions = []
+
+    for les in lesions:
+        loc = les.get("localization")
+        seg_id = loc["segment_id"] if (has_localization and loc) else None
+        y, x = les["min_pt"]
+
+        best_i, best_dist = None, None
+        for i, cand in enumerate(candidates):
+            if i in matched_indices:
+                continue  # one detection per candidate per frame
+            if has_localization and seg_id is not None and cand.segment_id is not None \
+                    and cand.segment_id != seg_id:
+                continue
+            cy, cx = cand.last_pos
+            dist = ((cy - y) ** 2 + (cx - x) ** 2) ** 0.5
+            if dist <= TRACK_BOX_TOLERANCE_PX and (best_dist is None or dist < best_dist):
+                best_i, best_dist = i, dist
+
+        if best_i is not None:
+            cand = candidates[best_i]
+            cand.detections.append(les)
+            cand.last_pos = (y, x)
+            cand.score += TRACK_HIT_SCORE
+            cand.peak_score = max(cand.peak_score, cand.score)
+            matched_indices.add(best_i)
         else:
-            groups.append({"members": [det], "centroid": (float(y), float(x))})
-    return [g["members"] for g in groups]
+            unmatched_lesions.append(les)
+
+    for i, cand in enumerate(candidates):
+        if i not in matched_indices:
+            cand.score -= TRACK_MISS_PENALTY
+
+    for les in unmatched_lesions:
+        loc = les.get("localization")
+        seg_id = loc["segment_id"] if (has_localization and loc) else None
+        y, x = les["min_pt"]
+        candidates.append(_TrackCandidate(
+            segment_id=seg_id, last_pos=(y, x), score=TRACK_HIT_SCORE, peak_score=TRACK_HIT_SCORE,
+            detections=[les],
+        ))
+
+    candidates[:] = [c for c in candidates if c.score > TRACK_DISCARD_SCORE]
 
 
-def build_lesion_tracks(frame_records: List[FrameRecord], has_localization: bool) -> List[LesionTrack]:
+def _finalize_tracks(candidates: List[_TrackCandidate], has_localization: bool) -> List[LesionTrack]:
     """
-    Clusters per-frame lesion detections into per-lesion tracks. Prefers the
-    AHA/SYNTAX segment id from the localization model (robust to per-frame
-    pixel jitter); falls back to a spatial grid bucket of the lesion's minimum
-    point when no localization model was supplied. Segment-id alone can span
-    two real, separate lesions (a long segment holding tandem stenoses), so
-    each segment bucket is further split by spatial proximity (see
-    _split_by_proximity) before becoming tracks.
+    Converts scored candidates into reported LesionTracks, keeping only
+    those that reached TRACK_CONFIRM_SCORE at their peak -- i.e. were
+    matched consistently enough across the run to be trusted as a real
+    lesion rather than a transient false positive.
     """
-    buckets = {}
-    for rec in frame_records:
-        for les in rec.lesions:
-            key = _track_key(les, has_localization)
-            buckets.setdefault(key, []).append(les)
-
     tracks = []
-    for dets in buckets.values():
-        for group in _split_by_proximity(dets, LESION_PROXIMITY_PX):
-            rep = max(group, key=lambda d: d.get("confidence", 0.0))
-            if has_localization and "localization" in rep:
-                loc = rep["localization"]
-                label, artery, group_name = loc["label"], loc["artery"], loc["group"]
-            else:
-                y, x = rep["min_pt"]
-                label, artery, group_name = f"unlabeled region near ({x}, {y})", "unknown", "unknown"
+    for cand in candidates:
+        if cand.peak_score < TRACK_CONFIRM_SCORE:
+            continue
 
-            tracks.append(LesionTrack(
-                track_id=f"L{len(tracks) + 1}", label=label, artery=artery, group=group_name, detections=group,
-            ))
+        rep = max(cand.detections, key=lambda d: d.get("confidence", 0.0))
+        if has_localization and "localization" in rep:
+            loc = rep["localization"]
+            label, artery, group = loc["label"], loc["artery"], loc["group"]
+        else:
+            y, x = rep["min_pt"]
+            label, artery, group = f"unlabeled region near ({x}, {y})", "unknown", "unknown"
+
+        tracks.append(LesionTrack(
+            track_id=f"L{len(tracks) + 1}", label=label, artery=artery, group=group, detections=cand.detections,
+        ))
 
     tracks.sort(key=lambda t: t.representative["DS_percent"], reverse=True)
     for i, t in enumerate(tracks, start=1):

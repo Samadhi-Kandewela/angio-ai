@@ -255,27 +255,51 @@ def run_localization_frame(model: LocalizationModel, img_rgb_enhanced: np.ndarra
     return class_map, confidence_map
 
 
-def run_qca_frame(img_gray: np.ndarray, mask_binary: np.ndarray, cfg: QCAConfig,
-                  class_map=None, confidence_map=None, use_merged_labels=False):
+def clean_vessel_mask(mask_binary: np.ndarray, cfg: QCAConfig) -> np.ndarray:
     """
-    Runs QCA analysis on a single frame's segmentation mask.
-
-    `mask_binary` may be {0,1} or {0,255} — it is normalized internally.
-    `use_merged_labels` selects the 15-class merged label scheme (set this to
-    `loc_model.use_merged_labels` when localization came from MaskLocalizationNet).
-    Returns (branches, lesions, dt, bw) where bw is the cleaned {0,255} mask
-    actually analyzed (needed downstream for overlay drawing / crops).
+    The cheap half of QCA: thresholding + morphological cleanup only (no
+    skeletonization). `mask_binary` may be {0,1} or {0,255} -- normalized
+    internally. Split out from run_qca_frame so callers that throttle the
+    expensive skeleton/lesion detection (see run_qca_from_clean_mask) can
+    still recompute this part every frame, keeping the mask contour always
+    in sync with whatever frame is actually on screen.
     """
     mask_u8 = (mask_binary.astype(np.uint8) * 255) if mask_binary.max() <= 1 else mask_binary.astype(np.uint8)
     bw = to_binary_mask(mask_u8)
-    bw = morph_cleanup(bw, cfg)
+    return morph_cleanup(bw, cfg)
 
+
+def run_qca_from_clean_mask(bw: np.ndarray, cfg: QCAConfig,
+                           class_map=None, confidence_map=None, use_merged_labels=False):
+    """
+    The expensive half of QCA: skeletonization, branch decomposition, and
+    sub-pixel lesion refinement on an already-cleaned mask (see
+    clean_vessel_mask). Returns (branches, lesions, dt).
+    """
     if np.sum(bw > 0) < cfg.min_component_pixels:
-        return [], [], np.zeros_like(bw, dtype=np.float32), bw
+        return [], [], np.zeros_like(bw, dtype=np.float32)
 
     branches, lesions, dt = qca_from_mask(bw, cfg)
 
     if class_map is not None and confidence_map is not None and lesions:
         lesions = localize_lesions(lesions, class_map, confidence_map, radius=9, use_merged=use_merged_labels)
 
+    return branches, lesions, dt
+
+
+def run_qca_frame(img_gray: np.ndarray, mask_binary: np.ndarray, cfg: QCAConfig,
+                  class_map=None, confidence_map=None, use_merged_labels=False):
+    """
+    Runs full QCA analysis (clean_vessel_mask + run_qca_from_clean_mask) on a
+    single frame's segmentation mask in one call.
+
+    `use_merged_labels` selects the 15-class merged label scheme (set this to
+    `loc_model.use_merged_labels` when localization came from MaskLocalizationNet).
+    Returns (branches, lesions, dt, bw) where bw is the cleaned {0,255} mask
+    actually analyzed (needed downstream for overlay drawing / crops).
+    """
+    bw = clean_vessel_mask(mask_binary, cfg)
+    branches, lesions, dt = run_qca_from_clean_mask(
+        bw, cfg, class_map=class_map, confidence_map=confidence_map, use_merged_labels=use_merged_labels
+    )
     return branches, lesions, dt, bw

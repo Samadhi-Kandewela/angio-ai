@@ -33,6 +33,7 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     PROJECT_ROOT / "checkpoints" / "mobileunetv3" / "mobileunetv3_augmented_best.pth",
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "best.onnx",
     PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "best.pth",
     PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "latest.pth",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.onnx",
@@ -157,6 +158,7 @@ class LocalDicomAnalysisPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(scroll)
+        self._page_scroll_area = scroll
 
         content = QWidget()
         scroll.setWidget(content)
@@ -480,6 +482,7 @@ class LocalDicomAnalysisPage(QWidget):
 
         nav_row = QHBoxLayout()
         self.btn_prev_key_frame = QPushButton("◀ Previous")
+        self.btn_prev_key_frame.setFocusPolicy(Qt.NoFocus)
         self.btn_prev_key_frame.clicked.connect(self._go_prev_key_frame)
         self.btn_prev_key_frame.setEnabled(False)
         nav_row.addWidget(self.btn_prev_key_frame)
@@ -490,6 +493,7 @@ class LocalDicomAnalysisPage(QWidget):
         nav_row.addWidget(self.lbl_key_frame_position, stretch=1)
 
         self.btn_next_key_frame = QPushButton("Next ▶")
+        self.btn_next_key_frame.setFocusPolicy(Qt.NoFocus)
         self.btn_next_key_frame.clicked.connect(self._go_next_key_frame)
         self.btn_next_key_frame.setEnabled(False)
         nav_row.addWidget(self.btn_next_key_frame)
@@ -625,11 +629,20 @@ class LocalDicomAnalysisPage(QWidget):
 
     def _go_prev_key_frame(self):
         self._current_key_frame_page -= 1
-        self._render_current_key_frame()
+        self._render_current_key_frame_keep_scroll()
 
     def _go_next_key_frame(self):
         self._current_key_frame_page += 1
+        self._render_current_key_frame_keep_scroll()
+
+    def _render_current_key_frame_keep_scroll(self):
+        # Swapping in a new key frame's caption text can change its wrapped
+        # height, which reflows everything below it -- pin the page's scroll
+        # position across that reflow so Next/Previous doesn't visibly jump.
+        scrollbar = self._page_scroll_area.verticalScrollBar()
+        pos = scrollbar.value()
         self._render_current_key_frame()
+        scrollbar.setValue(pos)
 
     def _update_key_frames(self, angle_result):
         self._current_angle_result = angle_result

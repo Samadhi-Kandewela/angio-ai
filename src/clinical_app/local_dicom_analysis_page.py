@@ -31,6 +31,8 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     PROJECT_ROOT / "checkpoints" / "mobileunetv3" / "mobileunetv3_augmented_best.pth",
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "best.pth",
+    PROJECT_ROOT / "checkpoints" / "mask_localization_v2" / "latest.pth",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.onnx",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.pth",
     PROJECT_ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_best.onnx",

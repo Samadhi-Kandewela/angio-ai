@@ -103,13 +103,14 @@ def _analyze_frame_iterable(frame_iter, n_frames_total: int, angle_label: str, s
             loc_class_map is None or frame_idx % LOC_FRAME_INTERVAL == 0
         ):
             try:
-                loc_class_map, loc_confidence_map = run_localization_frame(loc_model, img_rgb_enhanced)
+                loc_class_map, loc_confidence_map = run_localization_frame(loc_model, img_rgb_enhanced, mask_binary)
             except Exception:
                 loc_class_map, loc_confidence_map = None, None
 
         branches, lesions, dt, bw = run_qca_frame(
             img_gray, mask_binary, cfg,
             class_map=loc_class_map, confidence_map=loc_confidence_map,
+            use_merged_labels=(loc_model.use_merged_labels if loc_model is not None else False),
         )
 
         if lesions:

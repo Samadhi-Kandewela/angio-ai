@@ -108,7 +108,7 @@ class DicomAnalysisThread(QThread):
             if self.loc_model is not None:
                 try:
                     self._loc_class_map, self._loc_confidence_map = run_localization_frame(
-                        self.loc_model, img_rgb_enhanced
+                        self.loc_model, img_rgb_enhanced, mask_binary
                     )
                 except Exception:
                     self._loc_class_map, self._loc_confidence_map = None, None
@@ -116,6 +116,7 @@ class DicomAnalysisThread(QThread):
             branches, lesions, dt, bw = run_qca_frame(
                 img_gray, mask_binary, self.qca_cfg,
                 class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+                use_merged_labels=(self.loc_model.use_merged_labels if self.loc_model is not None else False),
             )
 
             overlay = img_rgb_original.copy()

@@ -614,6 +614,7 @@ class LocalDicomAnalysisPage(QWidget):
     def _on_playback_finished(self):
         self.btn_play.setEnabled(True)
         self.btn_pause.setEnabled(False)
+        self.analysis_thread.seek(0)  # rewind to the start instead of staying on the last frame
 
     def _on_analysis_error(self, message: str):
         self.lbl_stenosis.setStyleSheet("color: #E5484D; font-weight: bold;")

@@ -1162,7 +1162,8 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
                         les: dict, cfg: QCAConfig, title: str,
                         heatmap: Optional[np.ndarray] = None) -> "plt.Figure":
     """
-    Builds the 3-panel explainable figure (cropped angiogram, width heatmap,
+    Builds the 4-panel explainable figure (raw cropped angiogram, the same
+    crop annotated with centerline/diameter markers, width heatmap, and the
     localized diameter profile) for a single lesion. Returns an open
     matplotlib Figure — caller is responsible for saving/embedding and closing it.
 
@@ -1191,6 +1192,7 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
     x1, x2 = max(0, x0 - crop_size), min(W, x0 + crop_size)
 
     patch_angio = angio_bgr[y1:y2, x1:x2].copy()
+    patch_raw = patch_angio.copy()  # snapshot before the centerline/diameter overlay below
     patch_heat = heatmap[y1:y2, x1:x2].copy()
     patch_mask = mask[y1:y2, x1:x2]
 
@@ -1209,19 +1211,24 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
     d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
     d_s = smooth_1d(d_raw, cfg.smooth_win)
 
-    fig = plt.figure(figsize=(14, 5))
+    fig = plt.figure(figsize=(18, 5))
 
-    ax1 = plt.subplot(1, 3, 1)
+    ax0 = plt.subplot(1, 4, 1)
+    ax0.imshow(cv2.cvtColor(patch_raw, cv2.COLOR_BGR2RGB))
+    ax0.set_title("Raw Angiogram")
+    ax0.axis('off')
+
+    ax1 = plt.subplot(1, 4, 2)
     ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
-    ax1.set_title("Lesion Angiogram")
+    ax1.set_title("Lesion Angiogram (Centerline + Diameter)")
     ax1.axis('off')
 
-    ax2 = plt.subplot(1, 3, 2)
+    ax2 = plt.subplot(1, 4, 3)
     ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
     ax2.set_title("Width Heatmap (Red=Wide, Blue=Narrow)")
     ax2.axis('off')
 
-    ax3 = plt.subplot(1, 3, 3)
+    ax3 = plt.subplot(1, 4, 4)
     region_raw = d_raw[disp_L:disp_R+1]
     region_smooth = d_s[disp_L:disp_R+1]
     x_axis = range(disp_L, disp_R+1)

@@ -162,6 +162,10 @@ def get_case_analysis_dir(case_id: str, root_dir: Optional[Path] = None) -> Path
     return get_case_dir(case_id, root_dir) / "analysis_results"
 
 
+def get_case_ecg_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:
+    return get_case_dir(case_id, root_dir) / "ecg_results"
+
+
 def load_metadata(case_id: str, root_dir: Optional[Path] = None) -> dict:
     """Loads a case's saved metadata.json (patient/study info), e.g. for report title pages."""
     metadata_path = get_case_dir(case_id, root_dir) / "metadata.json"

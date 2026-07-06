@@ -79,6 +79,46 @@ MATERIAL_COLORS = {
 }
 
 
+def metadata_search_dirs(obj_path: Path) -> List[Path]:
+    """Folders that may contain reports/images for an OBJ.
+
+    The original pipeline writes OBJ, reports, and validation images into one
+    folder. The reviewed DICOM packages place the OBJ under mesh/ and keep
+    reports/images in sibling folders, so the viewer needs to search both.
+    """
+    folder = obj_path.parent
+    case_root = folder.parent if folder.name.lower() == "mesh" else folder
+    candidates = [
+        folder,
+        case_root,
+        case_root / "reports",
+        case_root / "reprojection_validation",
+        case_root / "branch_mapping",
+        case_root / "selected_views",
+        case_root / "02_pipeline",
+        case_root / "05_final_validation",
+        case_root / "04_smoothed_confidence",
+    ]
+    seen = set()
+    paths: List[Path] = []
+    for path in candidates:
+        resolved = str(path.resolve()) if path.exists() else str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        paths.append(path)
+    return paths
+
+
+def find_metadata_file(obj_path: Path, names: List[str]) -> Optional[Path]:
+    for folder in metadata_search_dirs(obj_path):
+        for name in names:
+            path = folder / name
+            if path.exists():
+                return path
+    return None
+
+
 @dataclass
 class ObjPart:
     name: str
@@ -129,33 +169,33 @@ def parse_obj(path: Path) -> ObjMesh:
 
 
 def load_branch_report(obj_path: Path) -> Dict[int, Dict[str, str]]:
-    candidates = [
-        obj_path.with_name("pipeline_branch_quality_radius.csv"),
-        obj_path.with_name("hybrid_qca_radius_report.csv"),
-        obj_path.with_name("branch_quality_report.csv"),
-    ]
-    for csv_path in candidates:
-        if csv_path.exists():
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                rows = list(csv.DictReader(f))
-            report = {}
-            for row in rows:
-                try:
-                    report[int(row["branch_id"])] = row
-                except Exception:
-                    continue
-            return report
+    csv_path = find_metadata_file(
+        obj_path,
+        [
+            "pipeline_branch_quality_radius.csv",
+            "hybrid_qca_radius_report.csv",
+            "branch_quality_report.csv",
+            "qca_branch_radius_stenosis.csv",
+        ],
+    )
+    if csv_path:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        report = {}
+        for row in rows:
+            try:
+                report[int(row["branch_id"])] = row
+            except Exception:
+                continue
+        return report
     return {}
 
 
 def load_bad_reprojection_branch_ids(obj_path: Path) -> set[int]:
-    candidates = [
-        obj_path.with_name("final_reprojection_validation_report.csv"),
-        obj_path.with_name("reprojection_validation_report.csv"),
-    ]
     bad_ids: set[int] = set()
-    for csv_path in candidates:
-        if not csv_path.exists():
+    for name in ("final_reprojection_validation_report.csv", "reprojection_validation_report.csv"):
+        csv_path = find_metadata_file(obj_path, [name])
+        if not csv_path:
             continue
         with open(csv_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
@@ -424,23 +464,44 @@ class VTKArteryViewer(QMainWindow):
         return ""
 
     def load_pipeline_summary(self, obj_path: Path) -> Dict[str, object]:
-        candidates = [
-            obj_path.with_name("clinical_reconstruction_report.json"),
-            obj_path.with_name("pipeline_summary.json"),
-            obj_path.with_name("hybrid_qca_radius_summary.json"),
-            obj_path.with_name("filtered_epipolar_summary.json"),
-            obj_path.with_name("smoothed_junction_summary.json"),
+        names = [
+            "full_3d_reconstruction_summary.json",
+            "pipeline_summary.json",
+            "clinical_reconstruction_report.json",
+            "hybrid_qca_radius_summary.json",
+            "filtered_epipolar_summary.json",
+            "smoothed_junction_summary.json",
         ]
-        for path in candidates:
-            if path.exists():
-                try:
-                    import json
+        merged: Dict[str, object] = {}
+        for folder in metadata_search_dirs(obj_path):
+            for name in names:
+                path = folder / name
+                if path.exists():
+                    try:
+                        import json
 
-                    with open(path, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception:
-                    continue
-        return {}
+                        with open(path, "r", encoding="utf-8") as f:
+                            payload = json.load(f)
+                        if isinstance(payload, dict):
+                            for key, value in payload.items():
+                                merged.setdefault(key, value)
+                        if name == "full_3d_reconstruction_summary.json":
+                            pipeline_summary = find_metadata_file(obj_path, ["pipeline_summary.json"])
+                            if pipeline_summary:
+                                with open(pipeline_summary, "r", encoding="utf-8") as f:
+                                    pipeline_payload = json.load(f)
+                                if isinstance(pipeline_payload, dict):
+                                    payload.setdefault("view_a", pipeline_payload.get("view_a"))
+                                    payload.setdefault("view_b", pipeline_payload.get("view_b"))
+                                    payload.setdefault("num_xa_clips_found", pipeline_payload.get("num_xa_clips_found"))
+                                    payload.setdefault("branch_status_counts", pipeline_payload.get("branch_status_counts"))
+                                    merged.setdefault("view_a", pipeline_payload.get("view_a"))
+                                    merged.setdefault("view_b", pipeline_payload.get("view_b"))
+                                    merged.setdefault("num_xa_clips_found", pipeline_payload.get("num_xa_clips_found"))
+                                    merged.setdefault("branch_status_counts", pipeline_payload.get("branch_status_counts"))
+                    except Exception:
+                        continue
+        return merged
 
     def populate_validation_panel(self):
         self.lbl_summary.setText(self.format_summary_text())
@@ -519,36 +580,46 @@ class VTKArteryViewer(QMainWindow):
     def find_validation_images(self) -> List[Tuple[str, Path]]:
         if not self.obj_path:
             return []
-        folder = self.obj_path.parent
-        candidates = [
-            ("View A Final Reprojection", folder / "final_view_a_reprojection_validation.png"),
-            ("View B Final Reprojection", folder / "final_view_b_reprojection_validation.png"),
-            ("View A Supported Reprojection", folder / "final_view_a_supported_reprojection_validation.png"),
-            ("View B Supported Reprojection", folder / "final_view_b_supported_reprojection_validation.png"),
-            ("View A Passing Reprojection", folder / "final_view_a_passing_reprojection_validation.png"),
-            ("View B Passing Reprojection", folder / "final_view_b_passing_reprojection_validation.png"),
-            ("View A Reprojection", folder / "view_a_reprojection_validation.png"),
-            ("View B Reprojection", folder / "view_b_reprojection_validation.png"),
-            ("View A Supported Reprojection", folder / "view_a_supported_reprojection_validation.png"),
-            ("View B Supported Reprojection", folder / "view_b_supported_reprojection_validation.png"),
-            ("View A Passing Reprojection", folder / "view_a_passing_reprojection_validation.png"),
-            ("View B Passing Reprojection", folder / "view_b_passing_reprojection_validation.png"),
-            ("View A Segmentation", folder / "view_a_overlay.png"),
-            ("View B Segmentation", folder / "view_b_overlay.png"),
-            ("View C / IM1 Segmentation", folder / "view_c_overlay.png"),
-            ("View C / IM1 Validation", folder / "view_c_im1_validation_overlay.png"),
-            ("View A Mask", folder / "view_a_mask.png"),
-            ("View B Mask", folder / "view_b_mask.png"),
-            ("View C / IM1 Mask", folder / "view_c_mask.png"),
-            ("View A Skeleton", folder / "view_a_skeleton.png"),
-            ("View B Skeleton", folder / "view_b_skeleton.png"),
-            ("View C / IM1 Skeleton", folder / "view_c_skeleton.png"),
-            ("Filtered IM0 Reprojection", folder / "filtered_reprojection_IM0.png"),
-            ("Filtered IM2 Reprojection", folder / "filtered_reprojection_IM2.png"),
-            ("Optimized IM0 Reprojection", folder / "optimized_reprojection_IM0.png"),
-            ("Optimized IM2 Reprojection", folder / "optimized_reprojection_IM2.png"),
+        image_names = [
+            ("View A Final Reprojection", "final_view_a_reprojection_validation.png"),
+            ("View B Final Reprojection", "final_view_b_reprojection_validation.png"),
+            ("View A Supported Reprojection", "final_view_a_supported_reprojection_validation.png"),
+            ("View B Supported Reprojection", "final_view_b_supported_reprojection_validation.png"),
+            ("View A Passing Reprojection", "final_view_a_passing_reprojection_validation.png"),
+            ("View B Passing Reprojection", "final_view_b_passing_reprojection_validation.png"),
+            ("View A Reprojection", "view_a_reprojection_validation.png"),
+            ("View B Reprojection", "view_b_reprojection_validation.png"),
+            ("View A Supported Reprojection", "view_a_supported_reprojection_validation.png"),
+            ("View B Supported Reprojection", "view_b_supported_reprojection_validation.png"),
+            ("View A Passing Reprojection", "view_a_passing_reprojection_validation.png"),
+            ("View B Passing Reprojection", "view_b_passing_reprojection_validation.png"),
+            ("View A Branch Mapping", "view_a_branch_mapping.png"),
+            ("View B Branch Mapping", "view_b_branch_mapping.png"),
+            ("View A Selected Frame", "view_a_frame.png"),
+            ("View B Selected Frame", "view_b_frame.png"),
+            ("View A Segmentation", "view_a_overlay.png"),
+            ("View B Segmentation", "view_b_overlay.png"),
+            ("View C / IM1 Segmentation", "view_c_overlay.png"),
+            ("View C / IM1 Validation", "view_c_im1_validation_overlay.png"),
+            ("View A Mask", "view_a_mask.png"),
+            ("View B Mask", "view_b_mask.png"),
+            ("View C / IM1 Mask", "view_c_mask.png"),
+            ("View A Skeleton", "view_a_skeleton.png"),
+            ("View B Skeleton", "view_b_skeleton.png"),
+            ("View C / IM1 Skeleton", "view_c_skeleton.png"),
+            ("Filtered IM0 Reprojection", "filtered_reprojection_IM0.png"),
+            ("Filtered IM2 Reprojection", "filtered_reprojection_IM2.png"),
+            ("Optimized IM0 Reprojection", "optimized_reprojection_IM0.png"),
+            ("Optimized IM2 Reprojection", "optimized_reprojection_IM2.png"),
         ]
-        return [(label, path) for label, path in candidates if path.exists()]
+        found: List[Tuple[str, Path]] = []
+        seen = set()
+        for label, name in image_names:
+            path = find_metadata_file(self.obj_path, [name])
+            if path and str(path) not in seen:
+                found.append((label, path))
+                seen.add(str(path))
+        return found
 
     def update_overlay_image(self):
         if self.combo_overlay.count() == 0:

@@ -258,3 +258,5 @@ plot_*.py
 patient_data/
 
 rename_data_images.py
+my_3d_reconstruction*
+create_branch_mapping_images.py

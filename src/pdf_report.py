@@ -16,8 +16,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-from qca import QCAConfig, build_lesion_figure, _BRANCH_COLORS, _SEVERITY_BGR, _SEVERITY_RADIUS
-from report_engine import AngleResult, FrameRecord, LesionTrack, generate_reasoning
+from qca import QCAConfig, build_lesion_figure
+from report_engine import AngleResult, FrameRecord, LesionTrack, draw_angle_summary_bgr, generate_reasoning
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
@@ -200,49 +200,6 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Summary-frame overlay (uses each track's representative DS%/severity, not
-# this single frame's own noisy value, so numbers match the per-lesion pages)
-# ─────────────────────────────────────────────────────────────────────────────
-def _draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.ndarray:
-    vis = cv2.cvtColor(rec.img_gray, cv2.COLOR_GRAY2BGR)
-
-    contours, _ = cv2.findContours((rec.bw_mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(vis, contours, -1, (0, 255, 0), 1)
-
-    for bi, branch in enumerate(rec.branches):
-        color = _BRANCH_COLORS[bi % len(_BRANCH_COLORS)]
-        for (y, x) in branch:
-            vis[y, x] = color
-
-    track_of_lesion = {id(les): t for t in tracks for les in t.detections}
-
-    for les in rec.lesions:
-        t = track_of_lesion.get(id(les))
-        if t is None:
-            continue
-        rep = t.representative
-        sev = rep["severity"]
-        if sev not in ("SEVERE", "SIGNIFICANT"):
-            continue
-
-        color = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
-        radius = _SEVERITY_RADIUS.get(sev, 1)
-        branch = les["branch"]
-        L, R = les["L_idx"], les["R_idx"]
-        for i in range(L, min(R + 1, len(branch))):
-            y, x = branch[i]
-            cv2.circle(vis, (x, y), radius, color, -1)
-
-        y0, x0 = les["min_pt"]
-        occ = " [OCC]" if rep.get("total_occlusion") else ""
-        label = f"{t.track_id} {rep['DS_percent']:.1f}% {sev[:3]}{occ}"
-        font_scale = 0.45 if sev == "SEVERE" else 0.38
-        cv2.putText(vis, label, (x0 + 6, y0 - 4), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA)
-
-    return vis
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Pages
 # ─────────────────────────────────────────────────────────────────────────────
 def _add_title_page(pdf, patient_info, angle_results: List[AngleResult], all_tracks):
@@ -319,7 +276,7 @@ def _add_angle_summary_page(pdf, ar: AngleResult):
     if rec is None:
         return
 
-    vis_rgb = cv2.cvtColor(_draw_angle_summary_bgr(rec, ar.tracks), cv2.COLOR_BGR2RGB)
+    vis_rgb = cv2.cvtColor(draw_angle_summary_bgr(rec, ar.tracks), cv2.COLOR_BGR2RGB)
 
     fig = plt.figure(figsize=(8.5, 11))
     ax_img = fig.add_axes((0.06, 0.20, 0.88, 0.68))

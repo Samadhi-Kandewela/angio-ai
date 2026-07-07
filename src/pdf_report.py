@@ -18,6 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from qca import QCAConfig, build_lesion_figure
 from report_engine import AngleResult, FrameRecord, LesionTrack, draw_angle_summary_bgr, generate_reasoning
+from localization_labels import MAIN_BRANCH_ROLLUP, MAIN_BRANCH_ORDER
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
@@ -76,7 +77,9 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
     all_localization = all(vs.get("has_localization") for vs in view_summaries) if view_summaries else True
 
     with PdfPages(out_path) as pdf:
-        _add_diagnosis_title_page(pdf, patient_info, view_summaries, all_lesions)
+        _add_patient_details_findings_page(pdf, patient_info, view_summaries, all_lesions)
+
+        _add_diagnosis_title_page(pdf, view_summaries, all_lesions)
 
         for vs in view_summaries:
             if vs.get("lesions") and vs.get("summary_image"):
@@ -87,7 +90,86 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
     return out_path
 
 
-def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
+def _add_patient_details_findings_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
+    """
+    Page 1: patient demographics plus a one-line-per-branch "Angiogram
+    Findings" summary across the six main branches (see
+    MAIN_BRANCH_ROLLUP) -- mirrors the paper cath-lab form this report
+    replaces, where each major vessel is marked normal or annotated with its
+    finding rather than only listing detected lesions.
+    """
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
+
+    ax = fig.add_axes((0.08, 0.06, 0.84, 0.86))
+    ax.axis("off")
+
+    ax.text(0, 0.995, "⚠ AI-GENERATED ANALYSIS — for clinical correlation, not a standalone diagnosis",
+            transform=ax.transAxes, fontsize=10.5, fontweight="bold", color="#D62728", va="top")
+
+    y = 0.94
+    ax.text(0, y, "Patient Details", transform=ax.transAxes, fontsize=13, fontweight="bold", va="top")
+    y -= 0.05
+
+    view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
+    details = [
+        ("Patient ID", patient_info.get("patient_id") or "Not specified"),
+        ("Full Name", patient_info.get("full_name") or "Not specified"),
+        ("Age / Gender", f"{patient_info.get('age') or '—'} / {patient_info.get('gender') or '—'}"),
+        ("Study Date", patient_info.get("study_date") or "Not specified"),
+        ("Operator", patient_info.get("operator") or "Not specified"),
+        ("Report Generated", datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Views Analyzed", f"{len(view_summaries)} ({view_names})"),
+    ]
+    for label, value in details:
+        ax.text(0, y, f"{label}:", transform=ax.transAxes, fontsize=10.5, fontweight="bold", va="top")
+        ax.text(0.32, y, str(value), transform=ax.transAxes, fontsize=10.5, va="top")
+        y -= 0.038
+
+    y -= 0.03
+    ax.text(0, y, "Angiogram Findings", transform=ax.transAxes, fontsize=13, fontweight="bold", va="top")
+    y -= 0.05
+
+    lesions_by_branch: Dict[str, list] = {name: [] for name in MAIN_BRANCH_ORDER}
+    other = []
+    for vs, les in all_lesions:
+        branch = MAIN_BRANCH_ROLLUP.get(les.get("group"))
+        if branch is None:
+            other.append((vs, les))
+        else:
+            lesions_by_branch[branch].append((vs, les))
+
+    for branch in MAIN_BRANCH_ORDER:
+        items = lesions_by_branch[branch]
+        ax.text(0, y, branch, transform=ax.transAxes, fontsize=10.5, fontweight="bold", va="top")
+        if not items:
+            ax.text(0.24, y, "Normal — no significant stenosis detected.",
+                    transform=ax.transAxes, fontsize=10, va="top", color="#2E7D32")
+            y -= 0.04
+        else:
+            items.sort(key=lambda pair: pair[1]["DS_percent"], reverse=True)
+            worst_vs, worst_les = items[0]
+            color = _SEVERITY_RGB_MPL.get(worst_les["severity"], "black")
+            summary = (
+                f"{len(items)} finding(s) — worst: {worst_les['severity']} "
+                f"({worst_les['DS_percent']:.0f}% DS) in {worst_les['label']} ({worst_vs['view_label']})"
+            )
+            for wrapped in textwrap.wrap(summary, width=62):
+                ax.text(0.24, y, wrapped, transform=ax.transAxes, fontsize=10, va="top", color=color)
+                y -= 0.034
+        y -= 0.016
+
+    if other:
+        y -= 0.02
+        ax.text(0, y, f"Other findings ({len(other)}): not localized to a main branch "
+                       "(side-branch or no anatomical localization available).",
+                transform=ax.transAxes, fontsize=9, style="italic", va="top", color="#555555")
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _add_diagnosis_title_page(pdf, view_summaries: List[dict], all_lesions):
     fig = plt.figure(figsize=(8.5, 11))
     fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
 
@@ -99,10 +181,6 @@ def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries:
 
     view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
     lines = [
-        f"Patient ID: {patient_info.get('patient_id') or 'Not specified'}",
-        f"Patient Name: {patient_info.get('full_name') or 'Not specified'}",
-        f"Study Date: {patient_info.get('study_date') or 'Not specified'}",
-        f"Operator: {patient_info.get('operator') or 'Not specified'}",
         f"Report generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Angiographic views analyzed: {len(view_summaries)} ({view_names})",
         "",

@@ -40,11 +40,11 @@ SYNTAX_SEGMENTS = {
 
 
 def segment_label(segment_id: int) -> str:
-    """Return a display label such as '6 proximal LAD'."""
+    """Return a display label such as 'proximal LAD'."""
     meta = SYNTAX_SEGMENTS.get(int(segment_id))
     if meta is None:
         return "unknown"
-    return f"{meta['code']} {meta['name']}"
+    return meta["name"]
 
 
 def segment_group(segment_id: int) -> str:
@@ -114,6 +114,20 @@ MAIN_BRANCH_GROUPS = {
     "OM/intermediate",
 }
 
+# Collapses the proximal/mid/distal segments of each artery into the single
+# named vessel a report lists findings against one line per branch for (e.g.
+# the per-branch "Angiogram Findings" summary) -- six entries, same six
+# branches MAIN_BRANCH_GROUPS covers.
+MAIN_BRANCH_ROLLUP = {
+    "LM": "Left Main (LM)",
+    "RCA proximal": "RCA", "RCA mid": "RCA", "RCA distal": "RCA",
+    "LAD proximal": "LAD", "LAD mid": "LAD", "LAD distal": "LAD",
+    "LCX proximal": "LCX", "LCX distal": "LCX",
+    "PDA": "PDA",
+    "OM/intermediate": "OM / Intermediate",
+}
+MAIN_BRANCH_ORDER = ["Left Main (LM)", "LAD", "LCX", "RCA", "PDA", "OM / Intermediate"]
+
 
 # ─── Merged (data-driven) label scheme ────────────────────────────────────────
 #
@@ -166,7 +180,7 @@ MERGED_SEGMENT_LABELS = {
 
 def merged_segment_label(merged_id: int) -> str:
     meta = MERGED_SEGMENT_LABELS.get(int(merged_id))
-    return "unknown" if meta is None else f"{meta['code']} {meta['name']}"
+    return "unknown" if meta is None else meta["name"]
 
 
 def merged_segment_group(merged_id: int) -> str:

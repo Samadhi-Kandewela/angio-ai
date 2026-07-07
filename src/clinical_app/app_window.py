@@ -16,6 +16,7 @@ from patient_intake_page import PatientIntakePage
 from patient_records_page import PatientRecordsPage
 from local_dicom_analysis_page import LocalDicomAnalysisPage
 from ecg_analysis_page import EcgAnalysisPage
+from live_stream_page import LiveStreamPage
 
 # (label, enabled) -- enabled rows get a real page; disabled ones are future work.
 NAV_ITEMS = [
@@ -23,7 +24,7 @@ NAV_ITEMS = [
     ("Patient Records", True),
     ("DICOM Analysis", True),
     ("ECG Analysis", True),
-    ("Live Stream Analysis", False),
+    ("Live Stream Analysis", True),
     ("3D Viewer", False),
     ("Settings", False),
 ]
@@ -63,6 +64,9 @@ class AppWindow(QMainWindow):
         self.ecg_analysis_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(0))
         self._add_page(3, self.ecg_analysis_page)
 
+        self.live_stream_page = LiveStreamPage()
+        self._add_page(4, self.live_stream_page)
+
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
 
         self.statusBar().showMessage("Ready.")
@@ -98,7 +102,7 @@ class AppWindow(QMainWindow):
         layout.addWidget(self.nav_list)
         layout.addStretch()
 
-        version = QLabel("v0.4 — patient intake + records + DICOM/ECG analysis")
+        version = QLabel("v0.5 — patient intake + records + DICOM/ECG/live stream analysis")
         version.setObjectName("versionLabel")
         layout.addWidget(version)
 
@@ -129,4 +133,5 @@ class AppWindow(QMainWindow):
     def closeEvent(self, event):
         self.dicom_analysis_page.shutdown()
         self.ecg_analysis_page.shutdown()
+        self.live_stream_page.shutdown()
         event.accept()

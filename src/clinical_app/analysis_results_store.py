@@ -49,6 +49,10 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
                                placed -- so the analyst can see the
                                strongest evidence for each detection without
                                re-running analysis.
+      - key_frame_N_raw.png -- the same frame with no annotation at all, so
+                               the final report can show the untouched
+                               angiogram next to the AI-labeled one for
+                               direct visual comparison.
       - view_report.pdf     -- the per-view explainable report (crops,
                                heatmaps, diameter profiles, reasoning text),
                                via the existing multi-view PDF renderer
@@ -84,7 +88,12 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
         vis_bgr = draw_frame_stenosis_only(rec, angle_result.tracks)
         name = f"key_frame_{idx}.png"
         cv2.imwrite(str(view_dir / name), vis_bgr)
-        key_frame_images.append({"frame_idx": idx, "image": name})
+
+        raw_bgr = cv2.cvtColor(rec.img_rgb, cv2.COLOR_RGB2BGR)
+        raw_name = f"key_frame_{idx}_raw.png"
+        cv2.imwrite(str(view_dir / raw_name), raw_bgr)
+
+        key_frame_images.append({"frame_idx": idx, "image": name, "raw_image": raw_name})
 
     lesions_json = []
     for t in angle_result.tracks:

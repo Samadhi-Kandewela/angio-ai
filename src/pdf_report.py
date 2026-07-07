@@ -17,7 +17,10 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 from qca import QCAConfig, build_lesion_figure
-from report_engine import AngleResult, FrameRecord, LesionTrack, draw_angle_summary_bgr, generate_reasoning
+from report_engine import (
+    AngleResult, FrameRecord, LesionTrack, draw_angle_summary_bgr, generate_reasoning,
+    merge_cross_view_lesions,
+)
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
@@ -69,25 +72,39 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    all_lesions = [(vs, les) for vs in view_summaries for les in vs.get("lesions", [])]
-    all_lesions.sort(key=lambda pair: pair[1]["DS_percent"], reverse=True)
+    # Each view is analyzed completely independently, so the same real lesion
+    # commonly gets (re)detected across several views/runs at slightly
+    # different apparent severity -- merge those into one finding per real
+    # lesion (highest reading wins) before it ever reaches the summary table,
+    # rather than listing every independent view's raw detection as if it
+    # were a separate finding.
+    merged_lesions = merge_cross_view_lesions(view_summaries)
 
     any_localization = any(vs.get("has_localization") for vs in view_summaries)
     all_localization = all(vs.get("has_localization") for vs in view_summaries) if view_summaries else True
 
     with PdfPages(out_path) as pdf:
-        _add_diagnosis_title_page(pdf, patient_info, view_summaries, all_lesions)
+        _add_diagnosis_title_page(pdf, patient_info, view_summaries, merged_lesions)
 
         for vs in view_summaries:
             if vs.get("lesions") and vs.get("summary_image"):
                 _add_diagnosis_view_page(pdf, vs)
+            _add_diagnosis_key_frame_pages(pdf, vs)
 
-        _add_methodology_page(pdf, cfg, any_localization, all_localization)
+        _add_methodology_page(pdf, cfg, any_localization, all_localization, include_cross_view_note=True)
 
     return out_path
 
 
-def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
+def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict],
+                              merged_lesions: List[dict]):
+    """
+    merged_lesions: one entry per real, cross-view-deduplicated finding (see
+    report_engine.merge_cross_view_lesions) -- the same anatomical location
+    detected independently by more than one view is listed once, at its
+    highest-severity reading, with "n_views" recording how many views
+    corroborated it.
+    """
     fig = plt.figure(figsize=(8.5, 11))
     fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
 
@@ -113,29 +130,32 @@ def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries:
         ax.text(0, y, line, transform=ax.transAxes, fontsize=11, va="top")
         y -= 0.045
 
-    if not all_lesions:
+    if not merged_lesions:
         ax.text(0, y, "Impression: No significant stenosis detected across analyzed views.",
                 transform=ax.transAxes, fontsize=11, va="top")
         y -= 0.045
     else:
-        worst_vs, worst_les = all_lesions[0]
+        worst = merged_lesions[0]
+        n_raw = sum(len(vs.get("lesions", [])) for vs in view_summaries)
         impression = (
-            f"Impression: {len(all_lesions)} lesion(s) detected across {len(view_summaries)} view(s). "
-            f"Most severe: {worst_les['DS_percent']:.1f}% DS ({worst_les['severity']}) in "
-            f"{worst_les['label']} ({worst_vs['view_label']})."
+            f"Impression: {len(merged_lesions)} distinct lesion(s) identified across "
+            f"{len(view_summaries)} view(s) ({n_raw} raw detections; the same lesion independently "
+            f"caught by more than one view is merged, highest reading kept). Most severe: "
+            f"{worst['DS_percent']:.1f}% DS ({worst['severity']}) in {worst['label']} "
+            f"({worst['view_label']})."
         )
         for wrapped in textwrap.wrap(impression, width=92):
             ax.text(0, y, wrapped, transform=ax.transAxes, fontsize=11, va="top")
             y -= 0.045
 
-    if all_lesions:
+    if merged_lesions:
         y -= 0.03
         ax.text(0, y, "Stenosis Summary (most to least severe):", transform=ax.transAxes,
                 fontsize=12, fontweight="bold", va="top")
         y -= 0.045
 
-        col_x = [0.0, 0.20, 0.55, 0.68, 0.80]
-        headers = ["View", "Location", "Severity", "DS%", "Confidence"]
+        col_x = [0.0, 0.20, 0.55, 0.68, 0.80, 0.90]
+        headers = ["Best View", "Location", "Severity", "DS%", "Confidence", "Views"]
         for cx, h in zip(col_x, headers):
             ax.text(cx, y, h, transform=ax.transAxes, fontsize=9, fontweight="bold", va="top")
         y -= 0.032
@@ -143,16 +163,16 @@ def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries:
         def _trunc(s, n):
             return s if len(s) <= n else s[:n - 1] + "…"
 
-        for vs, les in all_lesions:
+        for m in merged_lesions:
             if y < 0.05:
                 ax.text(0, y, "... see per-view pages for the remainder.",
                         transform=ax.transAxes, fontsize=8.5, style="italic", va="top")
                 break
             row = [
-                _trunc(vs["view_label"], 16), _trunc(les["label"], 26), les["severity"],
-                f"{les['DS_percent']:.1f}%", f"{les.get('confidence', 0):.2f}",
+                _trunc(m["view_label"], 16), _trunc(m["label"], 26), m["severity"],
+                f"{m['DS_percent']:.1f}%", f"{m.get('confidence', 0):.2f}", f"×{m['n_views']}",
             ]
-            color = _SEVERITY_RGB_MPL.get(les["severity"], "black")
+            color = _SEVERITY_RGB_MPL.get(m["severity"], "black")
             for cx, val in zip(col_x, row):
                 ax.text(cx, y, val, transform=ax.transAxes, fontsize=8.5, va="top", color=color)
             y -= 0.028
@@ -181,9 +201,11 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     lesions = view_summary.get("lesions", [])
     shown = sum(1 for les in lesions if les.get("co_visible_in_summary_frame"))
+    has_key_frames = bool(view_summary.get("key_frame_images"))
     caption = (
-        f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram; "
-        "all are listed in the summary table."
+        f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram"
+        + (" — the key frame pages that follow depict the rest." if shown < len(lesions) and has_key_frames
+           else "; all are listed in the summary table.")
     )
     fig.text(0.5, 0.155, caption, ha="center", fontsize=8.5, style="italic")
 
@@ -197,6 +219,72 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     pdf.savefig(fig)
     plt.close(fig)
+
+
+def _add_diagnosis_key_frame_pages(pdf, view_summary: dict):
+    """
+    Adds pages showing every key frame saved for this view (see
+    analysis_results_store.save_view_results / report_engine.select_key_frames)
+    -- the smallest set of frames that together guarantee every SEVERE/
+    SIGNIFICANT lesion in this view is visually depicted at least once. The
+    single overview diagram (_add_diagnosis_view_page) only shows lesions
+    co-visible in one representative frame, so a real severe finding that
+    never happened to line up with the others in that one frame would
+    otherwise never appear as a picture anywhere in the report -- only as a
+    text row on the title page.
+
+    Two key frames per page (raw | AI-labeled pairs, stacked), sized down
+    from the overview page's single full-page image so both fit legibly.
+    """
+    view_dir = view_summary.get("_view_dir")
+    key_frames = view_summary.get("key_frame_images") or []
+    if not view_dir or not key_frames:
+        return
+
+    per_page = 2
+    row_tops = [0.53, 0.08]
+    row_height = 0.40
+
+    for page_start in range(0, len(key_frames), per_page):
+        page_frames = key_frames[page_start:page_start + per_page]
+        fig = plt.figure(figsize=(8.5, 11))
+        fig.suptitle(
+            f"{view_summary['view_label']} — Key Frames "
+            f"({page_start + 1}-{page_start + len(page_frames)} of {len(key_frames)})",
+            fontsize=13, fontweight="bold", y=0.975,
+        )
+
+        for row_i, kf in enumerate(page_frames):
+            top = row_tops[row_i]
+            annotated_path = Path(view_dir) / kf["image"]
+            if not annotated_path.exists():
+                continue
+            raw_name = kf.get("raw_image")
+            raw_path = Path(view_dir) / raw_name if raw_name else None
+            has_raw = raw_path is not None and raw_path.exists()
+
+            fig.text(0.5, top + row_height + 0.02, f"Frame {kf['frame_idx'] + 1}",
+                     ha="center", fontsize=10, fontweight="bold")
+
+            if has_raw:
+                ax_raw = fig.add_axes((0.06, top, 0.42, row_height))
+                ax_raw.imshow(plt.imread(str(raw_path)))
+                ax_raw.axis("off")
+                ax_raw.set_title("Raw", fontsize=9)
+
+                ax_ann = fig.add_axes((0.52, top, 0.42, row_height))
+                ax_ann.imshow(plt.imread(str(annotated_path)))
+                ax_ann.axis("off")
+                ax_ann.set_title("AI-Labeled", fontsize=9)
+            else:
+                ax_ann = fig.add_axes((0.22, top, 0.56, row_height))
+                ax_ann.imshow(plt.imread(str(annotated_path)))
+                ax_ann.axis("off")
+                ax_ann.set_title("AI-Labeled (raw comparison unavailable for this saved result)",
+                                 fontsize=8.5)
+
+        pdf.savefig(fig)
+        plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,7 +411,8 @@ def _add_lesion_page(pdf, ar: AngleResult, t: LesionTrack, cfg: QCAConfig):
     plt.close(fig)
 
 
-def _add_methodology_page(pdf, cfg: QCAConfig, any_localization: bool, all_localization: bool):
+def _add_methodology_page(pdf, cfg: QCAConfig, any_localization: bool, all_localization: bool,
+                          include_cross_view_note: bool = False):
     fig = plt.figure(figsize=(8.5, 11))
     fig.suptitle("Methodology & Limitations", fontsize=16, fontweight="bold", y=0.96)
     ax = fig.add_axes((0.08, 0.08, 0.84, 0.82))
@@ -339,15 +428,28 @@ def _add_methodology_page(pdf, cfg: QCAConfig, any_localization: bool, all_local
         f"actionable if symptomatic or a positive functional test; Moderate ≥{cfg.moderate_threshold:.0f}% DS;",
         "below that classified Mild / non-obstructive.",
         "",
-        "Each lesion's reported measurement is taken from the single video frame where",
-        "that lesion's detection confidence (edge sharpness + reference-segment quality +",
-        "lesion-span stability) was highest across the whole cine run, not an arbitrary frame.",
+        "Each lesion's reported measurement is the most severe reading among its reliably-",
+        "measured detections (not simply its single highest-confidence one) across the whole",
+        "cine run, so a lesion's true worst narrowing is reported even if it wasn't captured",
+        "in the run's single cleanest-measured frame.",
         "",
-        "Per-view overview diagrams show only lesions that are simultaneously visible in one",
-        "representative frame; lesions not co-visible with others in that frame are still fully",
-        "documented on their own page but may be absent from the overview image.",
+        "Each view's overview diagram shows only lesions simultaneously visible in one",
+        "representative frame; any lesion not co-visible there is instead shown on that",
+        "view's Key Frames page(s), a small set of frames chosen to guarantee every SEVERE/",
+        "SIGNIFICANT finding in the view is pictured at least once.",
         "",
     ]
+
+    if include_cross_view_note:
+        lines += [
+            "Each angiographic view is analyzed independently, so the same real lesion is",
+            "often (re)detected by more than one view at a slightly different apparent",
+            "severity. The Stenosis Summary reports each anatomical location once, at its",
+            "highest-severity reading across all views that detected it (\"Views\" column =",
+            "how many views corroborated that finding) -- see each view's own pages for its",
+            "individual, un-merged reading.",
+            "",
+        ]
 
     if not all_localization:
         if any_localization:

@@ -21,6 +21,7 @@ from frame_pipeline import (
     SegmentationModel, LocalizationModel,
     preprocess_frame, segment_frame, run_localization_frame, run_qca_frame,
 )
+from localization_labels import SYNTAX_SEGMENTS, remap_segment_id, MERGED_SEGMENT_LABELS
 
 # Offline analysis can afford to run localization more often than the live
 # preview (frame_pipeline / VideoThread use interval=15 to hold real-time FPS).
@@ -711,7 +712,9 @@ def build_frame_lesion_specs(rec: FrameRecord, tracks: List[LesionTrack]) -> Lis
     track on more than one branch -- e.g. at a bifurcation), using each
     track's whole-run representative severity/DS% but THIS frame's own
     captured position -- always accurate, since it's the exact frame that
-    measurement came from.
+    measurement came from. Label includes the DS%/severity (same format as
+    the view overview diagram) so a Key Frames panel is readable on its own,
+    without needing to cross-reference the summary table.
     """
     track_of_lesion = {id(les): t for t in tracks for les in t.detections}
     drawn_track_ids = set()
@@ -721,16 +724,19 @@ def build_frame_lesion_specs(rec: FrameRecord, tracks: List[LesionTrack]) -> Lis
         if t is None or t.track_id in drawn_track_ids:
             continue
         rep = t.representative
-        if rep["severity"] not in ("SEVERE", "SIGNIFICANT"):
+        sev = rep["severity"]
+        if sev not in ("SEVERE", "SIGNIFICANT"):
             continue
         drawn_track_ids.add(t.track_id)
 
         y0, x0 = les["min_pt"]
-        radius = 16 if rep["severity"] == "SEVERE" else 13
+        radius = 16 if sev == "SEVERE" else 13
+        occ = " [OCC]" if rep.get("total_occlusion") else ""
+        label = f"{t.track_id} {rep['DS_percent']:.1f}% {sev[:3]}{occ}"
         specs.append({
             "center": (x0, y0), "radius": radius,
-            "color": _SEVERITY_BGR.get(rep["severity"], _SEVERITY_BGR["MILD"]),
-            "label": t.track_id, "severity": rep["severity"],
+            "color": _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"]),
+            "label": label, "severity": sev,
         })
     return specs
 
@@ -911,3 +917,85 @@ def generate_reasoning(track: LesionTrack, cfg: QCAConfig) -> str:
         f"functional test; Moderate ≥{cfg.moderate_threshold:.0f}% DS)."
         f"{occ_sentence}{conf_sentence}{method_note}{frame_note}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-view lesion matching
+# ─────────────────────────────────────────────────────────────────────────────
+# Each saved view (analysis_results_store.save_view_results) is analyzed
+# completely independently -- there is no pixel-coordinate correspondence
+# between two different angiographic projections of the same vessel tree, so
+# lesions can't be matched across views the way _update_track_candidates
+# matches them *within* one view (by pixel distance from frame to frame). The
+# only signal that IS comparable across independently-analyzed views is the
+# anatomical location itself -- so cross-view matching keys on the
+# artery + SYNTAX segment (collapsed through the same commonly-confused/
+# adjacent-segment clusters already curated in localization_labels.py's
+# SEGMENT_MERGE_MAP, e.g. 14/14a/14b all count as the same vessel region) --
+# rather than a spatial bounding box, which has no meaning between two
+# different projections.
+_CODE_TO_RAW_SEGMENT_ID = {meta["code"]: raw_id for raw_id, meta in SYNTAX_SEGMENTS.items()}
+
+
+def _cross_view_match_key(label: str, artery: str):
+    """
+    Maps a lesion's location label (e.g. "14b left posterolateral side
+    branch") to a canonical cross-view matching key, collapsing segment
+    variants that are commonly confused or sit immediately adjacent on the
+    same vessel (see localization_labels.SEGMENT_MERGE_MAP) -- e.g. 14, 14a,
+    and 14b all map to the same key, so the same real lesion caught slightly
+    differently by two independently-analyzed views isn't reported as two
+    separate findings. Falls back to (artery, exact label) when the location
+    is unknown or doesn't parse as a recognized segment code.
+    """
+    code = label.split(" ", 1)[0] if label else ""
+    raw_id = _CODE_TO_RAW_SEGMENT_ID.get(code)
+    if raw_id is None:
+        return (artery, label)
+    merged_id = remap_segment_id(raw_id)
+    merged_code = MERGED_SEGMENT_LABELS.get(merged_id, {}).get("code", code)
+    return (artery, merged_code)
+
+
+def merge_cross_view_lesions(view_summaries: List[dict]) -> List[dict]:
+    """
+    Groups lesions from every saved view (analysis_results_store.
+    list_view_results) that anatomically match into a single reported
+    finding: same artery and the same (or a commonly-confused/adjacent)
+    SYNTAX segment. Within each group, reports the single most severe
+    (highest DS%) reading -- since a lesion straddling or near a segment
+    boundary can be caught as a smaller/larger apparent narrowing depending
+    on the projection, the highest reading is the clinically actionable one.
+
+    Returns one merged entry per real finding, sorted most to least severe:
+        {"label", "artery", "group", "severity", "DS_percent", "confidence",
+         "view_label", "n_views", "all_views": [...]}
+    "view_label"/the rest of the representative fields come from whichever
+    single (view, lesion) reading is most severe; "n_views" and "all_views"
+    record every view that independently corroborated this same location, so
+    a reader can see how many separate angiographic runs support the finding.
+    """
+    groups: dict = {}
+    for vs in view_summaries:
+        for les in vs.get("lesions", []):
+            key = _cross_view_match_key(les.get("label", ""), les.get("artery", "unknown"))
+            groups.setdefault(key, []).append((vs, les))
+
+    merged = []
+    for key, entries in groups.items():
+        best_vs, best_les = max(entries, key=lambda pair: pair[1]["DS_percent"])
+        views_seen = sorted({vs["view_label"] for vs, _ in entries})
+        merged.append({
+            "label": best_les["label"],
+            "artery": best_les["artery"],
+            "group": best_les["group"],
+            "severity": best_les["severity"],
+            "DS_percent": best_les["DS_percent"],
+            "confidence": best_les.get("confidence"),
+            "view_label": best_vs["view_label"],
+            "n_views": len(views_seen),
+            "all_views": views_seen,
+        })
+
+    merged.sort(key=lambda m: m["DS_percent"], reverse=True)
+    return merged

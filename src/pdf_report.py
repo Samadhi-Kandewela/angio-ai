@@ -89,7 +89,7 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
         for vs in view_summaries:
             if vs.get("lesions") and vs.get("summary_image"):
                 _add_diagnosis_view_page(pdf, vs)
-            _add_diagnosis_key_frame_pages(pdf, vs)
+            _add_diagnosis_key_frames_pages(pdf, vs)
 
         _add_methodology_page(pdf, cfg, any_localization, all_localization, include_cross_view_note=True)
 
@@ -203,9 +203,8 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
     shown = sum(1 for les in lesions if les.get("co_visible_in_summary_frame"))
     has_key_frames = bool(view_summary.get("key_frame_images"))
     caption = (
-        f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram"
-        + (" — the key frame pages that follow depict the rest." if shown < len(lesions) and has_key_frames
-           else "; all are listed in the summary table.")
+        f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram; "
+        "all are listed in the summary table."
     )
     fig.text(0.5, 0.155, caption, ha="center", fontsize=8.5, style="italic")
 
@@ -219,72 +218,6 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     pdf.savefig(fig)
     plt.close(fig)
-
-
-def _add_diagnosis_key_frame_pages(pdf, view_summary: dict):
-    """
-    Adds pages showing every key frame saved for this view (see
-    analysis_results_store.save_view_results / report_engine.select_key_frames)
-    -- the smallest set of frames that together guarantee every SEVERE/
-    SIGNIFICANT lesion in this view is visually depicted at least once. The
-    single overview diagram (_add_diagnosis_view_page) only shows lesions
-    co-visible in one representative frame, so a real severe finding that
-    never happened to line up with the others in that one frame would
-    otherwise never appear as a picture anywhere in the report -- only as a
-    text row on the title page.
-
-    Two key frames per page (raw | AI-labeled pairs, stacked), sized down
-    from the overview page's single full-page image so both fit legibly.
-    """
-    view_dir = view_summary.get("_view_dir")
-    key_frames = view_summary.get("key_frame_images") or []
-    if not view_dir or not key_frames:
-        return
-
-    per_page = 2
-    row_tops = [0.53, 0.08]
-    row_height = 0.40
-
-    for page_start in range(0, len(key_frames), per_page):
-        page_frames = key_frames[page_start:page_start + per_page]
-        fig = plt.figure(figsize=(8.5, 11))
-        fig.suptitle(
-            f"{view_summary['view_label']} — Key Frames "
-            f"({page_start + 1}-{page_start + len(page_frames)} of {len(key_frames)})",
-            fontsize=13, fontweight="bold", y=0.975,
-        )
-
-        for row_i, kf in enumerate(page_frames):
-            top = row_tops[row_i]
-            annotated_path = Path(view_dir) / kf["image"]
-            if not annotated_path.exists():
-                continue
-            raw_name = kf.get("raw_image")
-            raw_path = Path(view_dir) / raw_name if raw_name else None
-            has_raw = raw_path is not None and raw_path.exists()
-
-            fig.text(0.5, top + row_height + 0.02, f"Frame {kf['frame_idx'] + 1}",
-                     ha="center", fontsize=10, fontweight="bold")
-
-            if has_raw:
-                ax_raw = fig.add_axes((0.06, top, 0.42, row_height))
-                ax_raw.imshow(plt.imread(str(raw_path)))
-                ax_raw.axis("off")
-                ax_raw.set_title("Raw", fontsize=9)
-
-                ax_ann = fig.add_axes((0.52, top, 0.42, row_height))
-                ax_ann.imshow(plt.imread(str(annotated_path)))
-                ax_ann.axis("off")
-                ax_ann.set_title("AI-Labeled", fontsize=9)
-            else:
-                ax_ann = fig.add_axes((0.22, top, 0.56, row_height))
-                ax_ann.imshow(plt.imread(str(annotated_path)))
-                ax_ann.axis("off")
-                ax_ann.set_title("AI-Labeled (raw comparison unavailable for this saved result)",
-                                 fontsize=8.5)
-
-        pdf.savefig(fig)
-        plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

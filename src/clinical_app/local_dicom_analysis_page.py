@@ -25,7 +25,7 @@ import analysis_results_store
 from dicom_loader import discover_series, load_series_frames
 from dicom_analysis_thread import DicomAnalysisThread
 from frame_pipeline import SegmentationModel, LocalizationModel
-from report_engine import KEY_FRAME_MAX_COUNT, analyze_frame_list, draw_frame_stenosis_only
+from report_engine import analyze_frame_list, draw_frame_stenosis_only
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # angio-ai/
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
@@ -469,8 +469,8 @@ class LocalDicomAnalysisPage(QWidget):
 
         hint = QLabel(
             "Analyzed automatically once playback reaches the end of the series -- the smallest set "
-            f"of frames (up to {KEY_FRAME_MAX_COUNT}) that shows every significant stenosis at least "
-            "once, picked by vessel opacification quality, so every finding has real supporting "
+            "of frames that shows every reported stenosis at least once, picked by vessel "
+            "opacification quality, so every row in the findings table has real supporting "
             "evidence. Each picture shows only the original frame with a circle + short id (e.g. "
             "\"L1\") around its own stenosis -- no vessel mask or skeleton -- since these are this "
             "exact frame's own detections, always accurately placed."
@@ -653,11 +653,9 @@ class LocalDicomAnalysisPage(QWidget):
         self._current_key_frame_page = 0
         self._render_current_key_frame()
 
-        significant_tracks = [
-            t for t in angle_result.tracks if t.representative["severity"] in ("SEVERE", "SIGNIFICANT")
-        ]
-        if not significant_tracks:
-            self.lbl_key_frame_coverage.setText("No significant stenosis found across this series.")
+        all_tracks = angle_result.tracks
+        if not all_tracks:
+            self.lbl_key_frame_coverage.setText("No stenosis found across this series.")
             return
 
         track_of_lesion = {id(les): t for t in angle_result.tracks for les in t.detections}
@@ -668,20 +666,19 @@ class LocalDicomAnalysisPage(QWidget):
                 continue
             for les in rec.lesions:
                 t = track_of_lesion.get(id(les))
-                if t is not None and t.representative["severity"] in ("SEVERE", "SIGNIFICANT"):
+                if t is not None:
                     covered_ids.add(t.track_id)
 
-        n_total = len(significant_tracks)
-        n_covered = len({t.track_id for t in significant_tracks} & covered_ids)
+        n_total = len(all_tracks)
+        n_covered = len({t.track_id for t in all_tracks} & covered_ids)
         if n_covered >= n_total:
             self.lbl_key_frame_coverage.setText(
-                f"{len(angle_result.key_frame_indices)} key frame(s) found, covering all {n_total} significant finding(s)."
+                f"{len(angle_result.key_frame_indices)} key frame(s) found, covering all {n_total} finding(s)."
             )
         else:
             self.lbl_key_frame_coverage.setText(
                 f"{len(angle_result.key_frame_indices)} key frame(s) found, covering {n_covered}/{n_total} "
-                f"significant finding(s) -- some findings never co-occurred with others within the "
-                f"{KEY_FRAME_MAX_COUNT}-frame cap."
+                f"finding(s) -- some findings never co-occurred with others in a stored frame."
             )
 
     # ── Case / series selection ─────────────────────────────────────

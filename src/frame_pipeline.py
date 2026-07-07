@@ -25,7 +25,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from qca import QCAConfig, to_binary_mask, morph_cleanup, qca_from_mask
-from localization import anatomy_logits_to_map_and_confidence, localize_lesions
+from localization import anatomy_logits_to_map_and_confidence, localize_lesions, filter_lesions_to_main_branches
 
 
 def create_ort_session(model_path):
@@ -283,6 +283,11 @@ def run_qca_from_clean_mask(bw: np.ndarray, cfg: QCAConfig,
 
     if class_map is not None and confidence_map is not None and lesions:
         lesions = localize_lesions(lesions, class_map, confidence_map, radius=9, use_merged=use_merged_labels)
+        # Drop side/distal-branch and unrecognized-vessel (e.g. septal)
+        # detections here, at the source -- both the live preview and the
+        # offline report-analysis pass call this same function, so neither
+        # ever sees a lesion outside the six main reported branches.
+        lesions = filter_lesions_to_main_branches(lesions)
 
     return branches, lesions, dt
 

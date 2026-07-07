@@ -40,11 +40,11 @@ SYNTAX_SEGMENTS = {
 
 
 def segment_label(segment_id: int) -> str:
-    """Return a display label such as '6 proximal LAD'."""
+    """Return a display label such as 'proximal LAD'."""
     meta = SYNTAX_SEGMENTS.get(int(segment_id))
     if meta is None:
         return "unknown"
-    return f"{meta['code']} {meta['name']}"
+    return meta["name"]
 
 
 def segment_group(segment_id: int) -> str:
@@ -94,6 +94,39 @@ SEGMENT_TO_ARTERY_ID = [0] * NUM_ANATOMY_CLASSES
 for _segment_id, _meta in SYNTAX_SEGMENTS.items():
     SEGMENT_TO_GROUP_ID[_segment_id] = GROUP_TO_ID[_meta["group"]]
     SEGMENT_TO_ARTERY_ID[_segment_id] = ARTERY_TO_ID[_meta["artery"]]
+
+
+# ─── Clinical-report main branches ────────────────────────────────────────────
+#
+# A cath report only lists findings for these six major branches -- side
+# branches (Diagonal, PL branch) and small vessels the anatomy model was
+# never trained to recognize as their own class (e.g. septal perforators,
+# which fall out as "unknown"/background) are not read out separately. See
+# localization.filter_lesions_to_main_branches, which uses this set to drop
+# lesion detections outside these branches at detection time, before they
+# ever reach lesion tracking or the report.
+MAIN_BRANCH_GROUPS = {
+    "LM",
+    "RCA proximal", "RCA mid", "RCA distal",
+    "PDA",
+    "LAD proximal", "LAD mid", "LAD distal",
+    "LCX proximal", "LCX distal",
+    "OM/intermediate",
+}
+
+# Collapses the proximal/mid/distal segments of each artery into the single
+# named vessel a report lists findings against one line per branch for (e.g.
+# the per-branch "Angiogram Findings" summary) -- six entries, same six
+# branches MAIN_BRANCH_GROUPS covers.
+MAIN_BRANCH_ROLLUP = {
+    "LM": "Left Main (LM)",
+    "RCA proximal": "RCA", "RCA mid": "RCA", "RCA distal": "RCA",
+    "LAD proximal": "LAD", "LAD mid": "LAD", "LAD distal": "LAD",
+    "LCX proximal": "LCX", "LCX distal": "LCX",
+    "PDA": "PDA",
+    "OM/intermediate": "OM / Intermediate",
+}
+MAIN_BRANCH_ORDER = ["Left Main (LM)", "LAD", "LCX", "RCA", "PDA", "OM / Intermediate"]
 
 
 # ─── Merged (data-driven) label scheme ────────────────────────────────────────
@@ -147,7 +180,7 @@ MERGED_SEGMENT_LABELS = {
 
 def merged_segment_label(merged_id: int) -> str:
     meta = MERGED_SEGMENT_LABELS.get(int(merged_id))
-    return "unknown" if meta is None else f"{meta['code']} {meta['name']}"
+    return "unknown" if meta is None else meta["name"]
 
 
 def merged_segment_group(merged_id: int) -> str:
@@ -165,22 +198,3 @@ MERGED_SEGMENT_TO_ARTERY_ID = [0] * MERGED_NUM_ANATOMY_CLASSES
 for _new_id, _meta in MERGED_SEGMENT_LABELS.items():
     MERGED_SEGMENT_TO_GROUP_ID[_new_id] = GROUP_TO_ID[_meta["group"]]
     MERGED_SEGMENT_TO_ARTERY_ID[_new_id] = ARTERY_TO_ID[_meta["artery"]]
-
-
-# ─── Clinical-report main branches ────────────────────────────────────────────
-#
-# A cath report only lists findings for these six major branches -- side
-# branches (Diagonal, PL branch) and small vessels the anatomy model was
-# never trained to recognize as their own class (e.g. septal perforators,
-# which fall out as "unknown"/background) are not read out separately. See
-# localization.filter_lesions_to_main_branches, which uses this set to drop
-# lesion detections outside these branches at detection time, before they
-# ever reach lesion tracking or the report.
-MAIN_BRANCH_GROUPS = {
-    "LM",
-    "RCA proximal", "RCA mid", "RCA distal",
-    "PDA",
-    "LAD proximal", "LAD mid", "LAD distal",
-    "LCX proximal", "LCX distal",
-    "OM/intermediate",
-}

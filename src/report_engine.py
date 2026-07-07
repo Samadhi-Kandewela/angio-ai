@@ -11,7 +11,7 @@ angle's lesions simultaneously as possible, for the 2D overview diagram.
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -53,25 +53,11 @@ TRACK_DISCARD_SCORE = -3.0
 # confirmed lesion rather than discarded as a false positive.
 TRACK_CONFIRM_SCORE = 4.0
 
-# select_key_frames() itself is uncapped by default (every confirmed lesion
-# gets a supporting frame). This constant is kept only as an optional cap a
-# caller can opt into -- e.g. a fixed-size UI panel that can't lay out an
-# unbounded number of images -- by passing max_count=KEY_FRAME_MAX_COUNT
-# explicitly.
+# Key frames are picked to guarantee every SEVERE/SIGNIFICANT lesion track has
+# supporting evidence in at least one frame (see select_key_frames), capped at
+# this many so the UI never has to lay out an unbounded number of panels.
 KEY_FRAME_MAX_COUNT = 5
 KEY_FRAME_MIN_GAP = 3
-
-# A frame only counts as "dye has fully reached the vessel" -- and so is
-# allowed to feed lesion measurements into tracking -- if its opacified
-# (skeletonized) vessel length is at least this fraction of the single most
-# opacified frame in the run. Frames below this bar are still contrast
-# filling in or washing out: the vessel isn't fully outlined yet, so a
-# narrowing measured there is less reliable than the same narrowing measured
-# once the dye has completely filled the artery. Stricter than
-# MIN_VESSEL_COVERAGE_FRACTION (used only to pick a display frame further
-# below) because this one gates what's allowed to become a measurement, not
-# just what looks reasonable in a diagram.
-PEAK_OPACIFICATION_FRACTION = 0.9
 
 
 @dataclass
@@ -141,17 +127,14 @@ def _analyze_frame_iterable(frame_iter, n_frames_total: int, angle_label: str, s
     """
     Shared whole-run QCA analysis loop: runs segmentation + QCA over every
     frame yielded by frame_iter. Only frames containing >=1 detected lesion
-    are retained in memory. Lesion tracking is a separate pass that runs
-    after this loop (see below) so it can be restricted to frames where the
-    contrast dye has fully opacified the vessel (PEAK_OPACIFICATION_FRACTION)
-    -- that peak can only be known once every frame's vessel coverage has
-    been seen, hence the two passes. Used by both analyze_angle_video()
-    (reads from a video file) and analyze_frame_list() (an already-decoded
-    list, e.g. from a loaded DICOM series).
+    are retained in memory; detections are matched into per-lesion tracks
+    frame by frame as the loop runs (see _update_track_candidates), with a
+    hit/miss score that filters out transient false positives. Used by both
+    analyze_angle_video() (reads from a video file) and analyze_frame_list()
+    (an already-decoded list, e.g. from a loaded DICOM series).
     """
     frame_records: List[FrameRecord] = []
-    lesions_by_frame: Dict[int, list] = {}
-    coverage_by_frame: Dict[int, int] = {}
+    track_candidates: List[_TrackCandidate] = []
     loc_class_map = None
     loc_confidence_map = None
     frame_idx = 0
@@ -175,43 +158,19 @@ def _analyze_frame_iterable(frame_iter, n_frames_total: int, angle_label: str, s
             use_merged_labels=(loc_model.use_merged_labels if loc_model is not None else False),
         )
 
-        coverage_by_frame[frame_idx] = sum(len(b) for b in branches)
-
         if lesions:
             for les in lesions:
                 les["frame_idx"] = frame_idx
-            lesions_by_frame[frame_idx] = lesions
             frame_records.append(FrameRecord(
                 frame_idx=frame_idx, img_gray=img_gray, img_rgb=img_rgb_original,
                 bw_mask=bw, dt=dt, branches=branches, lesions=lesions,
             ))
 
+        _update_track_candidates(track_candidates, lesions, has_localization)
+
         frame_idx += 1
         if progress_cb is not None:
             progress_cb(frame_idx, n_frames_total)
-
-    # Peak-opacification pass: only frames whose vessel coverage is within
-    # PEAK_OPACIFICATION_FRACTION of the run's best-opacified frame ever feed
-    # detections into tracking -- frames still filling with or washing out of
-    # contrast are skipped outright, not scored as a "miss". Contrast doesn't
-    # sit at its peak for the whole run; coverage naturally dips below the
-    # threshold between heartbeats/injections and comes back up. Scoring
-    # those dips as misses would let a real, continuously-present lesion's
-    # candidate decay past TRACK_DISCARD_SCORE and get deleted during the
-    # dip, so the very next peak frame "rediscovers" it as a brand new track
-    # -- the same stenosis fragmenting into several different reported
-    # lesions. Skipping instead of missing means the candidate's score is
-    # untouched during a dip, so it survives to be matched again (same
-    # position + same anatomical segment, see _update_track_candidates) the
-    # next time the vessel peaks.
-    max_coverage = max(coverage_by_frame.values(), default=0)
-    peak_threshold = max_coverage * PEAK_OPACIFICATION_FRACTION
-    track_candidates: List[_TrackCandidate] = []
-    for idx in range(frame_idx):
-        is_peak = max_coverage > 0 and coverage_by_frame.get(idx, 0) >= peak_threshold
-        if not is_peak:
-            continue
-        _update_track_candidates(track_candidates, lesions_by_frame.get(idx, []), has_localization)
 
     tracks = _finalize_tracks(track_candidates, has_localization)
     summary_frame_idx = select_summary_frame(tracks, frame_records)
@@ -289,13 +248,9 @@ def analyze_frame_list(frames: List[np.ndarray], angle_label: str,
 
 def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, has_localization: bool) -> None:
     """
-    Online lesion tracking with a hit/miss score, called once per peak-
-    opacification frame (see the two-pass loop in _analyze_frame_iterable) --
-    including ones with zero detections, so misses are still counted
-    correctly for those frames. Non-peak frames are never passed here at all
-    (skipped, not scored), so a lesion's candidate isn't punished for the
-    normal dips in contrast between one peak and the next. A detection is
-    matched to the nearest existing candidate
+    Online lesion tracking with a hit/miss score, called once per analyzed
+    frame -- including frames with zero detections, so misses are counted
+    correctly. A detection is matched to the nearest existing candidate
     within TRACK_BOX_TOLERANCE_PX of that candidate's last known position (a
     bounding box sized to tolerate how much a lesion's apparent position
     shifts frame-to-frame with the cardiac cycle), and -- when a
@@ -446,44 +401,40 @@ def select_summary_frame(tracks: List[LesionTrack], frame_records: List[FrameRec
 
 
 def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack],
-                      max_count: Optional[int] = None,
+                      max_count: int = KEY_FRAME_MAX_COUNT,
                       min_gap: int = KEY_FRAME_MIN_GAP) -> List[int]:
     """
-    Greedily picks the smallest set of frames that shows every confirmed
-    lesion track at least once -- so each row in the report's lesion table
-    has real supporting evidence somewhere in the key-frames view, instead
-    of being selected purely by vessel coverage and hoping every lesion
-    happens to land in the top few frames (a run with more distinct lesions
-    than frames picked could otherwise silently drop some of them). No cap
-    on the number of frames: a lesion that never co-occurs with the others
-    in one frame still needs its own frame, or the table/key-frames counts
-    would drift apart (`max_count` can still be passed to force an old-style
-    cap, e.g. for a fixed-size UI panel, but leave it None for full
-    coverage).
+    Greedily picks the smallest set of frames (capped at max_count) that
+    shows every clinically-actionable (SEVERE/SIGNIFICANT) lesion track at
+    least once -- so each finding has real supporting evidence in the
+    key-frames view, instead of being selected purely by vessel coverage and
+    hoping every lesion happens to land in the top few frames (a run with
+    more distinct significant lesions than frames picked could otherwise
+    silently drop some of them).
 
-    Each step picks the frame that covers the most not-yet-covered tracks;
-    ties (and any picks once everything is already covered) are broken by
-    vessel coverage, so frame quality still matters wherever it doesn't
-    conflict with coverage. Picks prefer to stay >= min_gap frames apart (to
-    avoid near-identical consecutive frames from the same opacification
-    peak), but will ignore that spacing if it's the only way left to cover a
-    remaining track.
+    Each step picks the frame that covers the most not-yet-covered
+    significant tracks; ties (and any picks once everything is already
+    covered) are broken by vessel coverage, so frame quality still matters
+    wherever it doesn't conflict with coverage. Picks prefer to stay
+    >= min_gap frames apart (to avoid near-identical consecutive frames from
+    the same opacification peak), but will ignore that spacing if it's the
+    only way left to cover a remaining track.
 
-    If there are no tracks at all (nothing to cover), falls back to the
-    single highest-coverage frame so the panel isn't empty.
+    If there are no significant tracks at all (nothing to cover), falls back
+    to the highest-coverage frames so the panel isn't empty.
     """
     if not frame_records:
         return []
 
     track_of_lesion = {id(les): t for t in tracks for les in t.detections}
-    required_ids = {t.track_id for t in tracks}
+    significant_ids = {t.track_id for t in tracks if t.representative["severity"] in ("SEVERE", "SIGNIFICANT")}
 
     frame_tracks = {}
     for rec in frame_records:
         ids_here = {
             track_of_lesion[id(les)].track_id
             for les in rec.lesions
-            if id(les) in track_of_lesion and track_of_lesion[id(les)].track_id in required_ids
+            if id(les) in track_of_lesion and track_of_lesion[id(les)].track_id in significant_ids
         }
         frame_tracks[rec.frame_idx] = ids_here
 
@@ -493,7 +444,7 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
     covered: set = set()
     remaining = list(frame_records)
 
-    while remaining and (max_count is None or len(picked) < max_count) and covered != required_ids:
+    while remaining and len(picked) < max_count and covered != significant_ids:
         # Coverage always wins: min_gap is only a tie-break among frames that
         # would add the same number of new tracks, never a reason to exclude
         # the one frame that happens to be the sole source of a still-missing
@@ -511,21 +462,30 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
         covered |= frame_tracks[best.frame_idx]
         remaining.remove(best)
 
-    if not picked and frame_records:
-        picked.append(max(frame_records, key=_vessel_coverage).frame_idx)
+    if not picked:
+        ranked = sorted(frame_records, key=_vessel_coverage, reverse=True)
+        for rec in ranked:
+            if len(picked) >= max_count:
+                break
+            if all(abs(rec.frame_idx - p) >= min_gap for p in picked):
+                picked.append(rec.frame_idx)
+        if len(picked) < max_count:
+            for rec in ranked:
+                if len(picked) >= max_count:
+                    break
+                if rec.frame_idx not in picked:
+                    picked.append(rec.frame_idx)
 
     return picked
 
 
 def draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.ndarray:
     """
-    Renders one frame's vessel mask + every confirmed lesion track that has
-    a detection in this exact frame, using each lesion's track-representative
-    DS%/severity (the stable, whole-run value), not this single frame's own
-    noisier per-frame reading. Shared by the PDF report and the in-app
-    key-frames summary so the two never show different numbers for the same
-    lesion, and so every lesion in the report's table has a matching drawn
-    box somewhere across the key frames (see select_key_frames).
+    Renders one frame's vessel mask + SEVERE/SIGNIFICANT lesions using each
+    lesion's track-representative DS%/severity (the stable, whole-run value),
+    not this single frame's own noisier per-frame reading. Shared by the PDF
+    report and the in-app key-frames summary so the two never show different
+    numbers for the same lesion.
     """
     vis = cv2.cvtColor(rec.img_gray, cv2.COLOR_GRAY2BGR)
 
@@ -546,6 +506,8 @@ def draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.nd
             continue
         rep = t.representative
         sev = rep["severity"]
+        if sev not in ("SEVERE", "SIGNIFICANT"):
+            continue
         drawn_track_ids.add(t.track_id)
 
         color = _SEVERITY_BGR.get(sev, _SEVERITY_BGR["MILD"])
@@ -624,16 +586,12 @@ def _find_label_box(center, text_size, base_radius, occupied, img_shape):
 
 def build_frame_lesion_specs(rec: FrameRecord, tracks: List[LesionTrack]) -> List[dict]:
     """
-    Circle+tag specs for every one of this frame's OWN detected lesions
-    (deduplicated to one entry per track, in case this frame independently
-    detected the same track on more than one branch -- e.g. at a
-    bifurcation), using each track's whole-run representative severity/DS%
-    but THIS frame's own captured position -- always accurate, since it's
-    the exact frame that measurement came from. Not filtered by severity:
-    select_key_frames() already guarantees a key frame exists for every
-    confirmed track regardless of severity, so this needs to draw all of
-    them or the saved key_frame_N.png images would under-represent the
-    report's own lesion table.
+    Circle+tag specs for one frame's OWN detected lesions (deduplicated to
+    one entry per track, in case this frame independently detected the same
+    track on more than one branch -- e.g. at a bifurcation), using each
+    track's whole-run representative severity/DS% but THIS frame's own
+    captured position -- always accurate, since it's the exact frame that
+    measurement came from.
     """
     track_of_lesion = {id(les): t for t in tracks for les in t.detections}
     drawn_track_ids = set()
@@ -643,6 +601,8 @@ def build_frame_lesion_specs(rec: FrameRecord, tracks: List[LesionTrack]) -> Lis
         if t is None or t.track_id in drawn_track_ids:
             continue
         rep = t.representative
+        if rep["severity"] not in ("SEVERE", "SIGNIFICANT"):
+            continue
         drawn_track_ids.add(t.track_id)
 
         y0, x0 = les["min_pt"]

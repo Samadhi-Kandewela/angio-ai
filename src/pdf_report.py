@@ -18,6 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from qca import QCAConfig, build_lesion_figure
 from report_engine import AngleResult, FrameRecord, LesionTrack, draw_angle_summary_bgr, generate_reasoning
+from localization_labels import MAIN_BRANCH_ROLLUP, MAIN_BRANCH_ORDER
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
@@ -76,19 +77,99 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
     all_localization = all(vs.get("has_localization") for vs in view_summaries) if view_summaries else True
 
     with PdfPages(out_path) as pdf:
-        _add_diagnosis_title_page(pdf, patient_info, view_summaries, all_lesions)
+        _add_patient_details_findings_page(pdf, patient_info, view_summaries, all_lesions)
+
+        _add_diagnosis_title_page(pdf, view_summaries, all_lesions)
 
         for vs in view_summaries:
             if vs.get("lesions") and vs.get("summary_image"):
                 _add_diagnosis_view_page(pdf, vs)
-            _add_diagnosis_key_frames_pages(pdf, vs)
 
         _add_methodology_page(pdf, cfg, any_localization, all_localization)
 
     return out_path
 
 
-def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
+def _add_patient_details_findings_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
+    """
+    Page 1: patient demographics plus a one-line-per-branch "Angiogram
+    Findings" summary across the six main branches (see
+    MAIN_BRANCH_ROLLUP) -- mirrors the paper cath-lab form this report
+    replaces, where each major vessel is marked normal or annotated with its
+    finding rather than only listing detected lesions.
+    """
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
+
+    ax = fig.add_axes((0.08, 0.06, 0.84, 0.86))
+    ax.axis("off")
+
+    ax.text(0, 0.995, "⚠ AI-GENERATED ANALYSIS — for clinical correlation, not a standalone diagnosis",
+            transform=ax.transAxes, fontsize=10.5, fontweight="bold", color="#D62728", va="top")
+
+    y = 0.94
+    ax.text(0, y, "Patient Details", transform=ax.transAxes, fontsize=13, fontweight="bold", va="top")
+    y -= 0.05
+
+    view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
+    details = [
+        ("Patient ID", patient_info.get("patient_id") or "Not specified"),
+        ("Full Name", patient_info.get("full_name") or "Not specified"),
+        ("Age / Gender", f"{patient_info.get('age') or '—'} / {patient_info.get('gender') or '—'}"),
+        ("Study Date", patient_info.get("study_date") or "Not specified"),
+        ("Operator", patient_info.get("operator") or "Not specified"),
+        ("Report Generated", datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Views Analyzed", f"{len(view_summaries)} ({view_names})"),
+    ]
+    for label, value in details:
+        ax.text(0, y, f"{label}:", transform=ax.transAxes, fontsize=10.5, fontweight="bold", va="top")
+        ax.text(0.32, y, str(value), transform=ax.transAxes, fontsize=10.5, va="top")
+        y -= 0.038
+
+    y -= 0.03
+    ax.text(0, y, "Angiogram Findings", transform=ax.transAxes, fontsize=13, fontweight="bold", va="top")
+    y -= 0.05
+
+    lesions_by_branch: Dict[str, list] = {name: [] for name in MAIN_BRANCH_ORDER}
+    other = []
+    for vs, les in all_lesions:
+        branch = MAIN_BRANCH_ROLLUP.get(les.get("group"))
+        if branch is None:
+            other.append((vs, les))
+        else:
+            lesions_by_branch[branch].append((vs, les))
+
+    for branch in MAIN_BRANCH_ORDER:
+        items = lesions_by_branch[branch]
+        ax.text(0, y, branch, transform=ax.transAxes, fontsize=10.5, fontweight="bold", va="top")
+        if not items:
+            ax.text(0.24, y, "Normal — no significant stenosis detected.",
+                    transform=ax.transAxes, fontsize=10, va="top", color="#2E7D32")
+            y -= 0.04
+        else:
+            items.sort(key=lambda pair: pair[1]["DS_percent"], reverse=True)
+            worst_vs, worst_les = items[0]
+            color = _SEVERITY_RGB_MPL.get(worst_les["severity"], "black")
+            summary = (
+                f"{len(items)} finding(s) — worst: {worst_les['severity']} "
+                f"({worst_les['DS_percent']:.0f}% DS) in {worst_les['label']} ({worst_vs['view_label']})"
+            )
+            for wrapped in textwrap.wrap(summary, width=62):
+                ax.text(0.24, y, wrapped, transform=ax.transAxes, fontsize=10, va="top", color=color)
+                y -= 0.034
+        y -= 0.016
+
+    if other:
+        y -= 0.02
+        ax.text(0, y, f"Other findings ({len(other)}): not localized to a main branch "
+                       "(side-branch or no anatomical localization available).",
+                transform=ax.transAxes, fontsize=9, style="italic", va="top", color="#555555")
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _add_diagnosis_title_page(pdf, view_summaries: List[dict], all_lesions):
     fig = plt.figure(figsize=(8.5, 11))
     fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
 
@@ -100,10 +181,6 @@ def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries:
 
     view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
     lines = [
-        f"Patient ID: {patient_info.get('patient_id') or 'Not specified'}",
-        f"Patient Name: {patient_info.get('full_name') or 'Not specified'}",
-        f"Study Date: {patient_info.get('study_date') or 'Not specified'}",
-        f"Operator: {patient_info.get('operator') or 'Not specified'}",
         f"Report generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Angiographic views analyzed: {len(view_summaries)} ({view_names})",
         "",
@@ -182,11 +259,9 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     lesions = view_summary.get("lesions", [])
     shown = sum(1 for les in lesions if les.get("co_visible_in_summary_frame"))
-    has_key_frames = bool(view_summary.get("key_frame_images"))
     caption = (
         f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram; "
-        + ("every lesion is also pictured individually in the key frames that follow."
-           if has_key_frames else "all are listed in the summary table.")
+        "all are listed in the summary table."
     )
     fig.text(0.5, 0.155, caption, ha="center", fontsize=8.5, style="italic")
 
@@ -200,51 +275,6 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     pdf.savefig(fig)
     plt.close(fig)
-
-
-def _add_diagnosis_key_frames_pages(pdf, view_summary: dict):
-    """
-    Embeds every saved key-frame image for this view (see
-    report_engine.select_key_frames / analysis_results_store.save_view_results)
-    -- one circle+id marker per lesion, already burned into each PNG -- so the
-    final combined report gives visual evidence for every lesion in the
-    summary table, not just whichever ones happened to be co-visible in the
-    single overview diagram from _add_diagnosis_view_page. Tiles up to 6
-    images per page (2 columns x 3 rows), spilling onto extra pages if a view
-    has more key frames than that.
-    """
-    view_dir = view_summary.get("_view_dir")
-    key_frame_images = view_summary.get("key_frame_images") or []
-    if not view_dir or not key_frame_images:
-        return
-
-    cols, rows = 2, 3
-    per_page = cols * rows
-    for page_start in range(0, len(key_frame_images), per_page):
-        page_items = key_frame_images[page_start:page_start + per_page]
-
-        fig = plt.figure(figsize=(8.5, 11))
-        fig.suptitle(f"{view_summary['view_label']} — Key Frames (evidence for each finding)",
-                    fontsize=13, fontweight="bold", y=0.97)
-
-        cell_w, cell_h = 0.90 / cols, 0.84 / rows
-        for i, item in enumerate(page_items):
-            image_path = Path(view_dir) / item["image"]
-            if not image_path.exists():
-                continue
-            img = plt.imread(str(image_path))
-
-            r, c = divmod(i, cols)
-            ax = fig.add_axes((
-                0.05 + c * (0.94 / cols), 0.06 + (rows - 1 - r) * (0.88 / rows),
-                cell_w, cell_h,
-            ))
-            ax.imshow(img)
-            ax.axis("off")
-            ax.set_title(f"frame {item['frame_idx']}", fontsize=9)
-
-        pdf.savefig(fig)
-        plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

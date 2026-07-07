@@ -81,7 +81,6 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
         for vs in view_summaries:
             if vs.get("lesions") and vs.get("summary_image"):
                 _add_diagnosis_view_page(pdf, vs)
-            _add_diagnosis_key_frames_pages(pdf, vs)
 
         _add_methodology_page(pdf, cfg, any_localization, all_localization)
 
@@ -182,11 +181,9 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     lesions = view_summary.get("lesions", [])
     shown = sum(1 for les in lesions if les.get("co_visible_in_summary_frame"))
-    has_key_frames = bool(view_summary.get("key_frame_images"))
     caption = (
         f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram; "
-        + ("every lesion is also pictured individually in the key frames that follow."
-           if has_key_frames else "all are listed in the summary table.")
+        "all are listed in the summary table."
     )
     fig.text(0.5, 0.155, caption, ha="center", fontsize=8.5, style="italic")
 
@@ -200,51 +197,6 @@ def _add_diagnosis_view_page(pdf, view_summary: dict):
 
     pdf.savefig(fig)
     plt.close(fig)
-
-
-def _add_diagnosis_key_frames_pages(pdf, view_summary: dict):
-    """
-    Embeds every saved key-frame image for this view (see
-    report_engine.select_key_frames / analysis_results_store.save_view_results)
-    -- one circle+id marker per lesion, already burned into each PNG -- so the
-    final combined report gives visual evidence for every lesion in the
-    summary table, not just whichever ones happened to be co-visible in the
-    single overview diagram from _add_diagnosis_view_page. Tiles up to 6
-    images per page (2 columns x 3 rows), spilling onto extra pages if a view
-    has more key frames than that.
-    """
-    view_dir = view_summary.get("_view_dir")
-    key_frame_images = view_summary.get("key_frame_images") or []
-    if not view_dir or not key_frame_images:
-        return
-
-    cols, rows = 2, 3
-    per_page = cols * rows
-    for page_start in range(0, len(key_frame_images), per_page):
-        page_items = key_frame_images[page_start:page_start + per_page]
-
-        fig = plt.figure(figsize=(8.5, 11))
-        fig.suptitle(f"{view_summary['view_label']} — Key Frames (evidence for each finding)",
-                    fontsize=13, fontweight="bold", y=0.97)
-
-        cell_w, cell_h = 0.90 / cols, 0.84 / rows
-        for i, item in enumerate(page_items):
-            image_path = Path(view_dir) / item["image"]
-            if not image_path.exists():
-                continue
-            img = plt.imread(str(image_path))
-
-            r, c = divmod(i, cols)
-            ax = fig.add_axes((
-                0.05 + c * (0.94 / cols), 0.06 + (rows - 1 - r) * (0.88 / rows),
-                cell_w, cell_h,
-            ))
-            ax.imshow(img)
-            ax.axis("off")
-            ax.set_title(f"frame {item['frame_idx']}", fontsize=9)
-
-        pdf.savefig(fig)
-        plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

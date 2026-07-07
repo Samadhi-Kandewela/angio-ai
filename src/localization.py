@@ -1,7 +1,6 @@
 import numpy as np
 
 from localization_labels import (
-    MAIN_BRANCH_GROUPS,
     merged_segment_artery, merged_segment_group, merged_segment_label,
     segment_artery, segment_group, segment_label,
 )
@@ -93,21 +92,3 @@ def localize_lesions(lesions, class_map, confidence_map, radius=7, use_merged=Fa
         )
         localized.append(enriched)
     return localized
-
-
-def filter_lesions_to_main_branches(lesions):
-    """
-    Drops lesions localized to a side/distal branch (Diagonal, PL branch) or
-    to an unrecognized small vessel (segment_id 0 / "unknown" -- this is
-    where septal perforators and other non-SYNTAX vessels land, since the
-    anatomy model was never trained to name them) instead of one of the six
-    main branches a cath report actually lists (see MAIN_BRANCH_GROUPS).
-
-    Lesions with no "localization" key at all (no localization model was
-    available for this run) are left untouched -- with nothing to check
-    against, dropping them would be a guess rather than a filter.
-    """
-    return [
-        les for les in lesions
-        if "localization" not in les or les["localization"]["group"] in MAIN_BRANCH_GROUPS
-    ]

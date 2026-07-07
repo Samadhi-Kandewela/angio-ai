@@ -165,22 +165,3 @@ MERGED_SEGMENT_TO_ARTERY_ID = [0] * MERGED_NUM_ANATOMY_CLASSES
 for _new_id, _meta in MERGED_SEGMENT_LABELS.items():
     MERGED_SEGMENT_TO_GROUP_ID[_new_id] = GROUP_TO_ID[_meta["group"]]
     MERGED_SEGMENT_TO_ARTERY_ID[_new_id] = ARTERY_TO_ID[_meta["artery"]]
-
-
-# ─── Clinical-report main branches ────────────────────────────────────────────
-#
-# A cath report only lists findings for these six major branches -- side
-# branches (Diagonal, PL branch) and small vessels the anatomy model was
-# never trained to recognize as their own class (e.g. septal perforators,
-# which fall out as "unknown"/background) are not read out separately. See
-# localization.filter_lesions_to_main_branches, which uses this set to drop
-# lesion detections outside these branches at detection time, before they
-# ever reach lesion tracking or the report.
-MAIN_BRANCH_GROUPS = {
-    "LM",
-    "RCA proximal", "RCA mid", "RCA distal",
-    "PDA",
-    "LAD proximal", "LAD mid", "LAD distal",
-    "LCX proximal", "LCX distal",
-    "OM/intermediate",
-}

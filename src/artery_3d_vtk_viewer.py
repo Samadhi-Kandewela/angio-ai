@@ -862,8 +862,14 @@ class VTKArteryViewer(QMainWindow):
             return
 
         rotation = self.rotation_from_angles(primary_deg, secondary_deg)
-        source_direction = rotation @ np.array([0.0, 0.0, -1.0], dtype=float)
-        detector_up = rotation @ np.array([0.0, 1.0, 0.0], dtype=float)
+        # Local +Z is source->detector and local +Y is the detector's row
+        # axis (positive = further down the image), per
+        # scripts/epipolar_optimized_centerline.py::project_points -- a VTK
+        # camera needs the opposite sign on both to render right-side-up
+        # relative to the original angiogram (verified against real cases;
+        # using local +Z/+Y directly renders vertically flipped).
+        source_direction = rotation @ np.array([0.0, 0.0, 1.0], dtype=float)
+        detector_up = rotation @ np.array([0.0, -1.0, 0.0], dtype=float)
         source_direction, detector_up = self.apply_image_orientation(source_direction, detector_up)
         self.set_absolute_camera(source_direction, detector_up, scale_factor=0.62, distance_factor=3.0)
 

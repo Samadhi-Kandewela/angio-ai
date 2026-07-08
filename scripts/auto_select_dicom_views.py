@@ -481,7 +481,15 @@ def score_candidate_pair(a: FrameCandidate, b: FrameCandidate) -> Optional[Dict[
     quality = (a.quality_score + b.quality_score) * 0.5
     min_quality = min(a.quality_score, b.quality_score)
     phase = same_phase_shape_score(a, b)
-    branch_count_ratio = min(len(a.branches), len(b.branches)) / max(len(a.branches), len(b.branches), 1)
+    min_branches = min(len(a.branches), len(b.branches))
+    branch_count_ratio = min_branches / max(len(a.branches), len(b.branches), 1)
+    # Absolute richness: two frames with few-but-matching branches (e.g. 5/6)
+    # otherwise score as well on branch_count_ratio as two genuinely rich
+    # frames (e.g. 14/9) -- reward min branch count directly, and only let
+    # the ratio bonus count fully once there's enough anatomy on both sides
+    # to be worth ratio-matching in the first place.
+    richness_score = min(min_branches / 12.0, 1.0)
+    ratio_gate = min(min_branches / 8.0, 1.0)
     area_ratio = min(a.area_pct, b.area_pct) / max(a.area_pct, b.area_pct, 1e-6)
     coverage_penalty = 0.0
     if min(len(a.branches), len(b.branches)) < 7:
@@ -513,7 +521,8 @@ def score_candidate_pair(a: FrameCandidate, b: FrameCandidate) -> Optional[Dict[
         + 0.42 * quality
         + 11.0 * reliable
         + 5.0 * usable
-        + 35.0 * branch_count_ratio
+        + 24.0 * richness_score
+        + 20.0 * branch_count_ratio * ratio_gate
         + 4.0 * area_ratio
         + 0.14 * phase["cardiac_phase_similarity_score"]
         - 1.6 * objective
@@ -692,8 +701,8 @@ def main():
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dicom_auto_selection")
     parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--max-frames-per-clip", type=int, default=5)
-    parser.add_argument("--top-frames-per-clip", type=int, default=2)
+    parser.add_argument("--max-frames-per-clip", type=int, default=12)
+    parser.add_argument("--top-frames-per-clip", type=int, default=5)
     args = parser.parse_args()
 
     out = args.output_dir

@@ -68,6 +68,10 @@ def lesions_3d_path(case_id: str) -> Path:
     return reconstruction_dir(case_id) / "lesions_3d.json"
 
 
+def lesion_panel_path(case_id: str) -> Path:
+    return reconstruction_dir(case_id) / "lesion_panel.json"
+
+
 def write_status(case_id: str, state: str, message: str, **extra: Any) -> dict:
     data = {
         "case_id": case_id,
@@ -306,6 +310,77 @@ def _is_severe_lesion(lesion: dict) -> bool:
     return "severe" in severity or ds >= 70.0 or bool(lesion.get("total_occlusion"))
 
 
+def _is_moderate_or_severe_lesion(lesion: dict) -> bool:
+    """Panel-list filter: MODERATE and SEVERE tiers only (SIGNIFICANT is
+    intentionally excluded, per explicit product decision)."""
+    return str(lesion.get("severity", "")).upper() in {"MODERATE", "SEVERE"}
+
+
+def _radius_at_point(vertices: list[tuple[float, float, float]], point: list[float], k: int = 24) -> float:
+    """Median distance from `point` to its k nearest mesh vertices on the
+    same branch -- an estimate of the tube's local wall radius, since the
+    lesion point sits on the centerline and nearby ring vertices sit on the
+    wall around it."""
+    if not vertices:
+        return 1.0
+    pts = np.asarray(vertices, dtype=np.float64)
+    p = np.asarray(point, dtype=np.float64)
+    nearest = np.sort(np.linalg.norm(pts - p, axis=1))[: min(k, len(pts))]
+    radius = float(np.median(nearest))
+    return radius if math.isfinite(radius) and radius > 0 else 1.0
+
+
+def _lesions_3d_from_pipeline(recon_dir: Path, branch_vertices: dict[int, list[tuple[float, float, float]]]) -> list[dict] | None:
+    """Prefers lesions already attached to their exact mesh branch/point at
+    build time (scripts/dicom_3d_pipeline.py::apply_qca_narrowing) over the
+    fuzzy post-hoc token-overlap match below -- no matching step needed since
+    the QCA lesion detection ran on the same branch the mesh point came from."""
+    path = recon_dir / "pipeline_qca_lesions_3d.json"
+    if not path.exists():
+        return None
+    try:
+        raw_lesions = json.loads(path.read_text(encoding="utf-8")).get("lesions", [])
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not raw_lesions:
+        return None
+
+    lesions_3d = []
+    for i, lesion in enumerate(raw_lesions):
+        # MODERATE+SEVERE, not _is_severe_lesion: matches the panel's own bar
+        # (_is_moderate_or_severe_lesion) so a lesion whose narrowing is
+        # correctly baked into the mesh (via smooth_junction_mesh.py's
+        # report-authoritative correction) isn't then shown as "not in 3D"
+        # in the panel just because it's MODERATE rather than SEVERE.
+        if not _is_moderate_or_severe_lesion(lesion):
+            continue
+        branch_id = int(lesion["branch_id"])
+        position = lesion["position_3d"]
+        lesions_3d.append({
+            "lesion_id": f"L3D_{i + 1}",
+            "branch_id": branch_id,
+            "source_track_id": lesion.get("source_track_id"),
+            "view_label": lesion.get("view_label") or "3D reconstruction (view A)",
+            "artery": lesion.get("artery") or "unknown",
+            "label": lesion.get("label") or "unknown",
+            "group": lesion.get("group") or "unknown",
+            "severity": lesion.get("severity", "unknown"),
+            "DS_percent": float(lesion.get("DS_percent") or 0.0),
+            "MLD_px": lesion.get("MLD_px"),
+            "RVD_px": lesion.get("RVD_px"),
+            "MLD_mm": lesion.get("MLD_mm"),
+            "RVD_mm": lesion.get("RVD_mm"),
+            "confidence": lesion.get("confidence"),
+            "total_occlusion": bool(lesion.get("total_occlusion")),
+            "position_3d": position,
+            "tangent_3d": [0.0, 0.0, 1.0],
+            "vessel_radius_3d": _radius_at_point(branch_vertices.get(branch_id, []), position),
+            "marker_type": "centerline_point",
+            "color": _severity_color(str(lesion.get("severity", ""))),
+        })
+    return lesions_3d or None
+
+
 def build_lesion_3d_metadata(case_id: str) -> Path:
     """Creates a practical first-pass lesion overlay package for the 3D Viewer."""
     recon_dir = reconstruction_dir(case_id)
@@ -316,60 +391,74 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
     analysis_dir = patient_store.get_case_analysis_dir(case_id)
     all_views = analysis_results_store.list_view_results(analysis_dir)
     views = _filter_views_to_reconstruction_pair(all_views, recon_dir)
-    all_lesions = []
-    for view in views:
-        for lesion in view.get("lesions", []):
-            if _is_severe_lesion(lesion):
-                all_lesions.append((view, lesion))
 
-    used_counts: dict[int, int] = {}
-    assigned = []
-    for view, lesion in all_lesions:
-        branch_id = _choose_branch_for_lesion(lesion, branch_labels, used_counts)
-        if branch_id is None or branch_id not in branch_vertices:
-            continue
-        assigned.append((view, lesion, branch_id))
+    pipeline_lesions = _lesions_3d_from_pipeline(recon_dir, branch_vertices)
+    if pipeline_lesions is not None:
+        lesions_3d = pipeline_lesions
+        mapping_method = (
+            "severe lesions detected directly on their mesh branch during reconstruction "
+            "(scripts/dicom_3d_pipeline.py QCA pass) -- position is the exact centerline point, "
+            "no post-hoc branch matching"
+        )
+    else:
+        all_lesions = []
+        for view in views:
+            for lesion in view.get("lesions", []):
+                if _is_severe_lesion(lesion):
+                    all_lesions.append((view, lesion))
 
-    per_branch_totals: dict[int, int] = {}
-    per_branch_seen: dict[int, int] = {}
-    for _, _, branch_id in assigned:
-        per_branch_totals[branch_id] = per_branch_totals.get(branch_id, 0) + 1
+        used_counts: dict[int, int] = {}
+        assigned = []
+        for view, lesion in all_lesions:
+            branch_id = _choose_branch_for_lesion(lesion, branch_labels, used_counts)
+            if branch_id is None or branch_id not in branch_vertices:
+                continue
+            assigned.append((view, lesion, branch_id))
 
-    lesions_3d = []
-    for i, (view, lesion, branch_id) in enumerate(assigned):
-        ordinal = per_branch_seen.get(branch_id, 0)
-        per_branch_seen[branch_id] = ordinal + 1
-        surface = _branch_surface_location(branch_vertices[branch_id], ordinal, per_branch_totals[branch_id])
-        ds = float(lesion.get("DS_percent") or 0.0)
-        lesions_3d.append({
-            "lesion_id": f"L3D_{i + 1}",
-            "branch_id": branch_id,
-            "source_track_id": lesion.get("track_id"),
-            "view_label": view.get("view_label", "View"),
-            "artery": lesion.get("artery", "unknown"),
-            "label": lesion.get("label", "unknown"),
-            "group": lesion.get("group", "unknown"),
-            "severity": lesion.get("severity", "unknown"),
-            "DS_percent": ds,
-            "MLD_px": lesion.get("MLD_px"),
-            "RVD_px": lesion.get("RVD_px"),
-            "MLD_mm": lesion.get("MLD_mm"),
-            "RVD_mm": lesion.get("RVD_mm"),
-            "confidence": lesion.get("confidence"),
-            "total_occlusion": bool(lesion.get("total_occlusion")),
-            "position_3d": surface["position_3d"],
-            "tangent_3d": surface["tangent_3d"],
-            "vessel_radius_3d": surface["vessel_radius_3d"],
-            "marker_type": "wall_surface_patch",
-            "color": _severity_color(str(lesion.get("severity", ""))),
-            "view_report": str(Path(view["_view_dir"]) / "view_report.pdf"),
-        })
+        per_branch_totals: dict[int, int] = {}
+        per_branch_seen: dict[int, int] = {}
+        for _, _, branch_id in assigned:
+            per_branch_totals[branch_id] = per_branch_totals.get(branch_id, 0) + 1
+
+        lesions_3d = []
+        for i, (view, lesion, branch_id) in enumerate(assigned):
+            ordinal = per_branch_seen.get(branch_id, 0)
+            per_branch_seen[branch_id] = ordinal + 1
+            surface = _branch_surface_location(branch_vertices[branch_id], ordinal, per_branch_totals[branch_id])
+            ds = float(lesion.get("DS_percent") or 0.0)
+            lesions_3d.append({
+                "lesion_id": f"L3D_{i + 1}",
+                "branch_id": branch_id,
+                "source_track_id": lesion.get("track_id"),
+                "view_label": view.get("view_label", "View"),
+                "artery": lesion.get("artery", "unknown"),
+                "label": lesion.get("label", "unknown"),
+                "group": lesion.get("group", "unknown"),
+                "severity": lesion.get("severity", "unknown"),
+                "DS_percent": ds,
+                "MLD_px": lesion.get("MLD_px"),
+                "RVD_px": lesion.get("RVD_px"),
+                "MLD_mm": lesion.get("MLD_mm"),
+                "RVD_mm": lesion.get("RVD_mm"),
+                "confidence": lesion.get("confidence"),
+                "total_occlusion": bool(lesion.get("total_occlusion")),
+                "position_3d": surface["position_3d"],
+                "tangent_3d": surface["tangent_3d"],
+                "vessel_radius_3d": surface["vessel_radius_3d"],
+                "marker_type": "wall_surface_patch",
+                "color": _severity_color(str(lesion.get("severity", ""))),
+                "view_report": str(Path(view["_view_dir"]) / "view_report.pdf"),
+            })
+        mapping_method = (
+            "fallback: severe-only wall-surface lesion patches matched to a reconstructed branch "
+            "by artery-label token overlap (no in-pipeline QCA lesion file was found)"
+        )
 
     package = {
         "case_id": case_id,
         "mesh_obj": str(obj_path),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "mapping_method": "severe-only wall-surface lesion patches from the two reconstruction views; each displayed lesion is matched to a reconstructed branch and unmatched/non-severe lesions are not shown in 3D",
+        "mapping_method": mapping_method,
         "display_filter": "severe lesions only (severity contains SEVERE, DS_percent >= 70, or total occlusion)",
         "views_used": [
             {
@@ -386,6 +475,120 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
     recon_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(package, indent=2), encoding="utf-8")
     (recon_dir / "views_used.json").write_text(json.dumps(package["views_used"], indent=2), encoding="utf-8")
+    return out_path
+
+
+def build_lesion_panel(case_id: str) -> Path:
+    """Lists every MODERATE/SEVERE stenosis across ALL analyzed views for the
+    case (not just the two used for reconstruction), tagging each with
+    whether it's actually represented in the 3D mesh (`lesions_3d.json`) so
+    the viewer can show the rest as present-but-inactive instead of
+    silently omitting them. Must run after build_lesion_3d_metadata."""
+    recon_dir = reconstruction_dir(case_id)
+    try:
+        package = json.loads(lesions_3d_path(case_id).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        package = {"lesions": []}
+    unclaimed_3d = list(package.get("lesions", []))
+
+    analysis_dir = patient_store.get_case_analysis_dir(case_id)
+    all_views = analysis_results_store.list_view_results(analysis_dir)
+    reconstruction_views = _filter_views_to_reconstruction_pair(all_views, recon_dir)
+    reconstruction_view_labels = {v.get("view_label") for v in reconstruction_views}
+
+    def claim(view_label: str, lesion: dict) -> Optional[dict]:
+        track_id = lesion.get("track_id")
+        for entry in unclaimed_3d:
+            if entry.get("source_track_id") is not None and entry.get("view_label") == view_label and entry.get("source_track_id") == track_id:
+                unclaimed_3d.remove(entry)
+                return entry
+        # Fuzzy fallback: only reached when at least one unclaimed entry has
+        # no source_track_id at all -- the in-pipeline QCA path
+        # (scripts/dicom_3d_pipeline.py::attach_qca_lesions) only gets one
+        # when scripts/smooth_junction_mesh.py's report-correction step ran
+        # (needs --analysis-dir wired through run_full_3d_reconstruction.py)
+        # and found a matching report lesion; otherwise fall back to matching on
+        # severity + closest DS% instead.
+        if any(entry.get("source_track_id") is None for entry in unclaimed_3d):
+            severity = str(lesion.get("severity", "")).upper()
+            ds = float(lesion.get("DS_percent") or 0.0)
+            best, best_gap = None, 10.0
+            for entry in unclaimed_3d:
+                if entry.get("source_track_id") is not None:
+                    continue
+                if str(entry.get("severity", "")).upper() != severity:
+                    continue
+                gap = abs(float(entry.get("DS_percent") or 0.0) - ds)
+                if gap <= best_gap:
+                    best, best_gap = entry, gap
+            if best is not None:
+                unclaimed_3d.remove(best)
+                return best
+        return None
+
+    def entry_from_2d(view_label: str, lesion: dict, view_dir, matched: Optional[dict]) -> dict:
+        return {
+            "view_label": view_label,
+            "artery": lesion.get("artery", "unknown"),
+            "label": lesion.get("label", "unknown"),
+            "group": lesion.get("group", "unknown"),
+            "severity": lesion.get("severity", "unknown"),
+            "DS_percent": float(lesion.get("DS_percent") or 0.0),
+            "MLD_px": lesion.get("MLD_px"),
+            "RVD_px": lesion.get("RVD_px"),
+            "MLD_mm": lesion.get("MLD_mm"),
+            "RVD_mm": lesion.get("RVD_mm"),
+            "confidence": lesion.get("confidence"),
+            "total_occlusion": bool(lesion.get("total_occlusion")),
+            "view_report": str(Path(view_dir) / "view_report.pdf") if view_dir else None,
+            "in_3d": matched is not None,
+            "lesion_3d_id": matched.get("lesion_id") if matched else None,
+        }
+
+    entries = []
+    for view in all_views:
+        view_label = view.get("view_label", "View")
+        is_reconstruction_view = view_label in reconstruction_view_labels
+        for lesion in view.get("lesions", []):
+            if not _is_moderate_or_severe_lesion(lesion):
+                continue
+            matched = claim(view_label, lesion) if is_reconstruction_view else None
+            entries.append(entry_from_2d(view_label, lesion, view.get("_view_dir"), matched))
+
+    # Any mesh-drawn lesion nothing in the 2D report matched still needs a
+    # panel entry -- never silently drop something that's actually in the mesh.
+    for entry in unclaimed_3d:
+        entries.append({
+            "view_label": entry.get("view_label", "3D reconstruction"),
+            "artery": entry.get("artery", "unknown"),
+            "label": entry.get("label", "unknown"),
+            "group": entry.get("group", "unknown"),
+            "severity": entry.get("severity", "unknown"),
+            "DS_percent": float(entry.get("DS_percent") or 0.0),
+            "MLD_px": entry.get("MLD_px"),
+            "RVD_px": entry.get("RVD_px"),
+            "MLD_mm": entry.get("MLD_mm"),
+            "RVD_mm": entry.get("RVD_mm"),
+            "confidence": entry.get("confidence"),
+            "total_occlusion": bool(entry.get("total_occlusion")),
+            "view_report": None,
+            "in_3d": True,
+            "lesion_3d_id": entry.get("lesion_id"),
+        })
+
+    entries.sort(key=lambda e: (not e["in_3d"], -e["DS_percent"]))
+    for i, entry in enumerate(entries, start=1):
+        entry["panel_id"] = f"P{i}"
+
+    payload = {
+        "case_id": case_id,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "severity_filter": "MODERATE and SEVERE tiers only",
+        "entries": entries,
+    }
+    out_path = lesion_panel_path(case_id)
+    recon_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return out_path
 
 
@@ -482,6 +685,8 @@ class CaseAnalysisWorkflowThread(QThread):
                 str(self.seg_model_path),
                 "--threshold",
                 str(self.threshold),
+                "--analysis-dir",
+                str(analysis_dir),
             ]
             self._process = subprocess.Popen(
                 cmd,
@@ -498,12 +703,14 @@ class CaseAnalysisWorkflowThread(QThread):
 
             self._status("mapping_lesions_3d", "Mapping saved stenosis lesions onto the 3D reconstruction...")
             lesions_path = build_lesion_3d_metadata(self.case_id)
+            panel_path = build_lesion_panel(self.case_id)
             self._status(
                 "ready_for_3d_view",
                 "3D reconstruction is ready.",
                 final_report=str(final_report),
                 reconstruction_dir=str(recon_dir),
                 lesions_3d=str(lesions_path),
+                lesion_panel=str(panel_path),
             )
             self.ready.emit(self.case_id)
         except Exception as exc:

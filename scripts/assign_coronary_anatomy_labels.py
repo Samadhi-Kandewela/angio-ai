@@ -27,6 +27,37 @@ from coronary_anatomy_prior import CoronaryAnatomyPrior, DEFAULT_TEMPLATE_PATH  
 LCA_ORDER = ["LM", "LAD_prox", "LCX_prox", "LAD_mid", "LCX_distal", "D1", "OM1", "LAD_distal", "D2", "OM2", "LPL", "LPDA"]
 RCA_ORDER = ["RCA_prox", "RCA_mid", "RCA_distal", "PDA", "RPL"]
 
+# src/localization_labels.py SYNTAX groups -> this script's label vocabulary.
+# "Diagonal"/"OM/intermediate" need an ordinal (D1/D2, OM1/OM2) resolved per
+# case since several branches can share that group.
+LEARNED_GROUP_TO_LABEL = {
+    "LM": "LM",
+    "LAD proximal": "LAD_prox",
+    "LAD mid": "LAD_mid",
+    "LAD distal": "LAD_distal",
+    "LCX proximal": "LCX_prox",
+    "LCX distal": "LCX_distal",
+    "PL branch": "LPL",
+    "PDA": "LPDA",
+}
+LEARNED_ORDINAL_GROUPS = {"Diagonal": "D", "OM/intermediate": "OM"}
+LEARNED_MIN_CONFIDENCE = 0.55
+
+
+def load_learned_branch_anatomy(epipolar_dir: Path | None) -> Dict[int, Dict[str, object]]:
+    """Loads view A's learned per-branch anatomy (artery/group/confidence)
+    from epipolar_optimized_centerline.py's anatomy_anchor_candidates.json,
+    if that stage produced one (it's optional -- the localization model may
+    not be installed)."""
+    if epipolar_dir is None:
+        return {}
+    path = Path(epipolar_dir) / "anatomy_anchor_candidates.json"
+    if not path.exists():
+        return {}
+    data = load_json(path)
+    raw = data.get("view_a", {}).get("learned_branch_anatomy", {})
+    return {int(branch_id): info for branch_id, info in raw.items()}
+
 
 def load_json(path: Path) -> Dict[str, object]:
     with open(path, "r", encoding="utf-8") as f:
@@ -99,39 +130,91 @@ def mean_y(row: Dict[str, object]) -> float:
     return float(row.get("mean_yx", [256.0, 256.0])[0])
 
 
-def assign_lca_labels(rows: List[Dict[str, object]]) -> Dict[int, Dict[str, object]]:
+def assign_learned_labels(
+    rows: List[Dict[str, object]], learned_by_branch: Dict[int, Dict[str, object]]
+) -> Dict[int, Dict[str, object]]:
+    """Assigns labels straight from the trained localization model's
+    per-branch vote, for branches it's confident about. Direct groups (LM,
+    LAD proximal/mid/distal, LCX proximal/distal, PL, PDA) map one-to-one;
+    Diagonal/OM branches get an ordinal (D1/D2, OM1/OM2) by branch length,
+    since several branches can share that group."""
+    assignments: Dict[int, Dict[str, object]] = {}
+    ordinal_pool: Dict[str, List[Dict[str, object]]] = {}
+    for row in rows:
+        branch_id = int(row["branch_id"])
+        learned = learned_by_branch.get(branch_id)
+        if not learned or float(learned.get("confidence", 0.0)) < LEARNED_MIN_CONFIDENCE:
+            continue
+        group = learned.get("group", "")
+        rationale = f"trained anatomical-localization model (group={group}, confidence={float(learned['confidence']):.2f})"
+        if group in LEARNED_GROUP_TO_LABEL:
+            assignments[branch_id] = {"label": LEARNED_GROUP_TO_LABEL[group], "confidence": "moderate", "rationale": rationale}
+        elif group in LEARNED_ORDINAL_GROUPS:
+            ordinal_pool.setdefault(group, []).append(row)
+
+    for group, prefix in LEARNED_ORDINAL_GROUPS.items():
+        candidates = sorted(ordinal_pool.get(group, []), key=lambda r: -float(r.get("length_px", 0.0)))
+        for ordinal, row in enumerate(candidates[:2], start=1):
+            branch_id = int(row["branch_id"])
+            learned = learned_by_branch[branch_id]
+            assignments[branch_id] = {
+                "label": f"{prefix}{ordinal}",
+                "confidence": "moderate",
+                "rationale": f"trained anatomical-localization model (group={group}, confidence={float(learned['confidence']):.2f})",
+            }
+    return assignments
+
+
+def assign_lca_labels(
+    rows: List[Dict[str, object]], learned_by_branch: Dict[int, Dict[str, object]] | None = None
+) -> Dict[int, Dict[str, object]]:
     assignments: Dict[int, Dict[str, object]] = {}
     if not rows:
         return assignments
 
+    assignments.update(assign_learned_labels(rows, learned_by_branch or {}))
+
     ranked = sorted(rows, key=lambda r: (-float(r.get("length_px", 0.0)), -float(r.get("mean_diameter_px", 0.0))))
-    unassigned = {int(row["branch_id"]) for row in rows}
+    unassigned = {int(row["branch_id"]) for row in rows} - set(assignments)
+    used_labels = {a["label"] for a in assignments.values()}
 
     # The likely left main is a thick branch nearest the inlet/left side. Keep
     # confidence low because 2D branch tracing can split the ostium strangely.
-    lm_pool = sorted(rows, key=lambda r: (endpoint_leftness(r), -float(r.get("mean_diameter_px", 0.0))))
-    if lm_pool:
-        lm = int(lm_pool[0]["branch_id"])
-        assignments[lm] = {"label": "LM", "confidence": "low", "rationale": "nearest inlet-side branch in the LCA tree"}
-        unassigned.discard(lm)
+    # Skipped if the localization model already placed an LM branch above.
+    if "LM" not in used_labels:
+        lm_pool = sorted(
+            [row for row in rows if int(row["branch_id"]) in unassigned],
+            key=lambda r: (endpoint_leftness(r), -float(r.get("mean_diameter_px", 0.0))),
+        )
+        if lm_pool:
+            lm = int(lm_pool[0]["branch_id"])
+            assignments[lm] = {"label": "LM", "confidence": "low", "rationale": "nearest inlet-side branch in the LCA tree"}
+            unassigned.discard(lm)
+            used_labels.add("LM")
 
-    main_candidates = [row for row in ranked if int(row["branch_id"]) in unassigned][:2]
-    if len(main_candidates) == 2:
-        upper, lower = sorted(main_candidates, key=mean_y)
-        assignments[int(upper["branch_id"])] = {
-            "label": "LAD_prox",
-            "confidence": "low",
-            "rationale": "long superior-running LCA branch candidate",
-        }
-        assignments[int(lower["branch_id"])] = {
-            "label": "LCX_prox",
-            "confidence": "low",
-            "rationale": "long inferior/lateral-running LCA branch candidate",
-        }
-        unassigned.discard(int(upper["branch_id"]))
-        unassigned.discard(int(lower["branch_id"]))
+    if "LAD_prox" not in used_labels and "LCX_prox" not in used_labels:
+        main_candidates = [row for row in ranked if int(row["branch_id"]) in unassigned][:2]
+        if len(main_candidates) == 2:
+            upper, lower = sorted(main_candidates, key=mean_y)
+            assignments[int(upper["branch_id"])] = {
+                "label": "LAD_prox",
+                "confidence": "low",
+                "rationale": "long superior-running LCA branch candidate",
+            }
+            assignments[int(lower["branch_id"])] = {
+                "label": "LCX_prox",
+                "confidence": "low",
+                "rationale": "long inferior/lateral-running LCA branch candidate",
+            }
+            unassigned.discard(int(upper["branch_id"]))
+            unassigned.discard(int(lower["branch_id"]))
+            used_labels.update({"LAD_prox", "LCX_prox"})
 
-    remaining_labels = ["LAD_mid", "LCX_distal", "D1", "OM1", "LAD_distal", "D2", "OM2", "LPL", "LPDA"]
+    remaining_labels = [
+        label
+        for label in ["LAD_mid", "LCX_distal", "D1", "OM1", "LAD_distal", "D2", "OM2", "LPL", "LPDA"]
+        if label not in used_labels
+    ]
     for row, label in zip([r for r in ranked if int(r["branch_id"]) in unassigned], remaining_labels):
         assignments[int(row["branch_id"])] = {
             "label": label,
@@ -182,6 +265,12 @@ def main():
     parser.add_argument("--validation-report", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE_PATH)
+    parser.add_argument(
+        "--epipolar-dir",
+        type=Path,
+        default=None,
+        help="Optional epipolar_optimized_centerline.py output dir, used to prefer the trained localization model's per-branch labels when confident.",
+    )
     args = parser.parse_args()
 
     prior = CoronaryAnatomyPrior.load(args.template)
@@ -189,10 +278,11 @@ def main():
     geometry = branch_geometry(args.pipeline_dir / "view_a_branches.json")
     branch_report = load_csv(args.branch_report, "branch_id")
     validation = load_validation(args.validation_report)
+    learned_by_branch = load_learned_branch_anatomy(args.epipolar_dir)
     tree = infer_major_tree(pipeline_summary, geometry.values())
 
     if tree["major_tree"] == "LCA":
-        assignments = assign_lca_labels(list(geometry.values()))
+        assignments = assign_lca_labels(list(geometry.values()), learned_by_branch)
         order = LCA_ORDER
     elif tree["major_tree"] == "RCA":
         assignments = assign_rca_labels(list(geometry.values()))

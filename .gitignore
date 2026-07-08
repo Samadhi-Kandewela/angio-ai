@@ -243,6 +243,7 @@ plot_*.py
 /dicom_pipeline_output_v2/
 /dicom_preview/
 /dicom_selected_segmentation/
+/dicom_verify*
 
 # Local outputs / debug folders
 /src/ecg_output/

@@ -137,11 +137,21 @@ def copy_selection_artifacts(selection_dir: Path, output_dir: Path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dicom-dir", type=Path, required=True, help="Input DICOM folder containing XA clips.")
+    parser.add_argument(
+        "--analysis-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional case analysis_results/ folder (per-view QCA reports). When given, "
+            "the mesh's lesion narrowing is corrected to match the report's MODERATE/SEVERE "
+            "lesions for View A's series instead of using an independent QCA re-detection."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dicom_full_3d_run")
     parser.add_argument("--model", type=Path, default=ROOT / "checkpoints" / "mobileunetv3" / "mobileunetv3_augmented_best.onnx")
     parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--top-frames-per-clip", type=int, default=3)
-    parser.add_argument("--max-frames-per-clip", type=int, default=5)
+    parser.add_argument("--top-frames-per-clip", type=int, default=5)
+    parser.add_argument("--max-frames-per-clip", type=int, default=12)
     parser.add_argument("--view-a-index", type=int, help="Optional override for selected view A clip.")
     parser.add_argument("--frame-a", type=int, help="Optional override for selected view A frame.")
     parser.add_argument("--view-b-index", type=int, help="Optional override for selected view B clip.")
@@ -236,17 +246,6 @@ def main():
     )
 
     run_step(
-        "Smooth Junction-Aware Mesh",
-        [
-            sys.executable,
-            "scripts/smooth_junction_mesh.py",
-            "--input-dir",
-            str(pipeline_dir),
-        ],
-        ROOT,
-    )
-
-    run_step(
         "Epipolar Optimized Centerline Validation",
         [
             sys.executable,
@@ -258,6 +257,21 @@ def main():
         ],
         ROOT,
     )
+
+    smooth_cmd = [
+        sys.executable,
+        "scripts/smooth_junction_mesh.py",
+        "--input-dir",
+        str(pipeline_dir),
+    ]
+    if args.analysis_dir is not None:
+        smooth_cmd += [
+            "--epipolar-dir",
+            str(epipolar_dir),
+            "--analysis-dir",
+            str(args.analysis_dir),
+        ]
+    run_step("Smooth Junction-Aware Mesh", smooth_cmd, ROOT)
 
     run_step(
         "Confidence Recolor Smoothed Tree",
@@ -306,6 +320,8 @@ def main():
             str(anatomy_dir),
             "--template",
             str(args.anatomy_template),
+            "--epipolar-dir",
+            str(epipolar_dir),
         ],
         ROOT,
     )
@@ -314,6 +330,9 @@ def main():
     copy_anatomy_artifacts(anatomy_dir, out)
     copy_epipolar_anatomy_artifacts(epipolar_dir, out)
     copy_selection_artifacts(selection_dir, out)
+    qca_lesions_source = pipeline_dir / "pipeline_qca_lesions_3d.json"
+    if qca_lesions_source.exists():
+        shutil.copyfile(qca_lesions_source, out / "pipeline_qca_lesions_3d.json")
 
     run_step(
         "Clinical Reconstruction Confidence Report",

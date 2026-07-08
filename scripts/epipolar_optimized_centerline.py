@@ -45,12 +45,67 @@ from dicom_3d_pipeline import (  # noqa: E402
     write_obj,
 )
 
+from localization import localize_point  # noqa: E402
+
 
 def load_gray(path: Path) -> np.ndarray:
     image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise FileNotFoundError(path)
     return image
+
+
+def clahe_enhance_rgb(gray: np.ndarray) -> np.ndarray:
+    """Matches src/frame_pipeline.py::preprocess_frame's enhancement recipe,
+    which the localization model was trained/deployed against."""
+    rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return cv2.cvtColor(cv2.merge((clahe.apply(l), a, b)), cv2.COLOR_LAB2RGB)
+
+
+# Learned SYNTAX artery labels (src/localization_labels.py) collapsed onto the
+# LM/LAD/LCX/side_branch roles that branch_role_probabilities already scores.
+_ROLE_BY_ARTERY = {
+    "LM": "LM",
+    "LAD": "LAD",
+    "LCX": "LCX",
+    "LCX/PDA": "LCX",
+    "RCA": "side_branch",
+    "RCA/PDA": "side_branch",
+}
+
+
+def sample_branch_anatomy(branch: Dict[str, object], class_map, confidence_map) -> Dict[str, object] | None:
+    """Majority-votes the learned per-pixel anatomy class map along a
+    branch's centerline. Returns the winning (artery, group) with its
+    LM/LAD/LCX/side_branch role and average confidence, or None if no
+    learned map is available or every sampled point was background."""
+    if class_map is None:
+        return None
+    points = branch["centerline_yx"]
+    step = max(1, len(points) // 12)
+    votes: Dict[Tuple[str, str], int] = {}
+    conf_sum: Dict[Tuple[str, str], float] = {}
+    for y, x in points[::step]:
+        result = localize_point(class_map, confidence_map, (y, x), radius=7)
+        if result["artery"] in ("unknown", "background"):
+            continue
+        key = (result["artery"], result["group"])
+        votes[key] = votes.get(key, 0) + 1
+        conf_sum[key] = conf_sum.get(key, 0.0) + result["confidence"]
+    if not votes:
+        return None
+    best_key = max(votes, key=lambda k: votes[k])
+    artery, group = best_key
+    return {
+        "artery": artery,
+        "group": group,
+        "role": _ROLE_BY_ARTERY.get(artery, "side_branch"),
+        "confidence": float(conf_sum[best_key] / votes[best_key]),
+        "vote_fraction": float(votes[best_key] / sum(votes.values())),
+    }
 
 
 def project_points(points_xyz: np.ndarray, view: Dict[str, object]) -> np.ndarray:
@@ -306,6 +361,8 @@ def branch_role_probabilities(
     lm_branch_id: int | None = None,
     lad_branch_id: int | None = None,
     lcx_branch_id: int | None = None,
+    learned_role: str | None = None,
+    learned_confidence: float = 0.0,
 ) -> Dict[str, float]:
     branch_id = int(branch["branch_id"])
     if lm_branch_id is not None and branch_id == lm_branch_id:
@@ -331,6 +388,11 @@ def branch_role_probabilities(
         "side_branch": 0.25 + 0.6 * max(0.0, abs(dx) + abs(dy) - 0.8) + 0.5 * min(length / 90.0, 1.0),
         "unknown": 0.2,
     }
+    if learned_role in scores and learned_confidence > 0.0:
+        # Bias toward the trained anatomical-localization model's vote
+        # (src/frame_pipeline.py::LocalizationModel) instead of relying on
+        # position/length/diameter geometry alone.
+        scores[learned_role] += 3.0 * learned_confidence
     probs = softmax_scores(scores)
     return probs
 
@@ -518,6 +580,8 @@ def detect_anatomy_anchors(
     mask: np.ndarray,
     output_path: Path,
     view_name: str,
+    class_map=None,
+    confidence_map=None,
 ) -> Dict[str, object]:
     branch_by_id = {int(branch["branch_id"]): branch for branch in branches}
     ostium_candidates = endpoint_ostium_candidates(graph, branches)
@@ -580,6 +644,15 @@ def detect_anatomy_anchors(
     elif candidates:
         selected = {**candidates[0], "source": "fallback_bifurcation_node", "confidence": "low"}
 
+    # Learned anatomy is independent of whether a bifurcation anchor was
+    # found -- collect it for every branch so assign_coronary_anatomy_labels.py
+    # can use it even when the geometric LM/bifurcation trace fails.
+    learned_branch_anatomy = {}
+    for branch in branches:
+        learned = sample_branch_anatomy(branch, class_map, confidence_map)
+        if learned is not None:
+            learned_branch_anatomy[str(int(branch["branch_id"]))] = learned
+
     branch_probs = {}
     if selected:
         bif_yx = np.asarray(selected["yx"], dtype=np.float64)
@@ -588,6 +661,7 @@ def detect_anatomy_anchors(
         lad_branch_id = selected.get("lad_branch_id")
         lcx_branch_id = selected.get("lcx_branch_id")
         for branch in branches:
+            learned = learned_branch_anatomy.get(str(int(branch["branch_id"])))
             probs = branch_role_probabilities(
                 branch,
                 bif_yx,
@@ -595,6 +669,8 @@ def detect_anatomy_anchors(
                 lm_branch_id=lm_branch_id,
                 lad_branch_id=lad_branch_id,
                 lcx_branch_id=lcx_branch_id,
+                learned_role=learned["role"] if learned else None,
+                learned_confidence=learned["confidence"] if learned else 0.0,
             )
             branch_probs[str(int(branch["branch_id"]))] = probs
 
@@ -606,6 +682,7 @@ def detect_anatomy_anchors(
         "lm_trace_candidates": lm_trace_candidates[:8],
         "bifurcation_candidates": candidates[:8],
         "branch_role_probabilities": branch_probs,
+        "learned_branch_anatomy": learned_branch_anatomy,
     }
 
 
@@ -916,10 +993,34 @@ def draw_match_overlay(original, mask, accepted, view, output_path: Path):
     cv2.imwrite(str(output_path), canvas)
 
 
+DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.onnx",
+    ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.pth",
+    ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_best.onnx",
+    ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_best.pth",
+]
+
+
+def load_localization_model(model_path: Path | None):
+    """Best-effort load of the trained anatomical-localization model. Anatomy
+    matching falls back to the geometric heuristic alone if it's missing."""
+    candidates = [model_path] if model_path else DEFAULT_LOCALIZATION_MODEL_PATHS
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            try:
+                from frame_pipeline import LocalizationModel
+
+                return LocalizationModel(str(candidate))
+            except Exception as exc:
+                print(f"[warn] Could not load localization model {candidate}: {exc}")
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", type=Path, default=ROOT / "dicom_pipeline_output_v2")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dicom_epipolar_optimized")
+    parser.add_argument("--localization-model", type=Path, default=None, help="Optional override for the anatomy-localization model checkpoint.")
     args = parser.parse_args()
 
     input_dir = args.input_dir
@@ -940,6 +1041,12 @@ def main():
     dist_a = cv2.distanceTransform((clean_a == 0).astype(np.uint8), cv2.DIST_L2, 5)
     dist_b = cv2.distanceTransform((clean_b == 0).astype(np.uint8), cv2.DIST_L2, 5)
 
+    class_map_a = class_map_b = confidence_map_a = confidence_map_b = None
+    loc_model = load_localization_model(args.localization_model)
+    if loc_model is not None:
+        class_map_a, confidence_map_a = loc_model.predict(clahe_enhance_rgb(original_a))
+        class_map_b, confidence_map_b = loc_model.predict(clahe_enhance_rgb(original_b))
+
     graph_a = load_json_if_exists(input_dir / "view_a_vessel_graph.json")
     graph_b = load_json_if_exists(input_dir / "view_b_vessel_graph.json")
     anchors_a = detect_anatomy_anchors(
@@ -949,6 +1056,8 @@ def main():
         clean_a,
         out / "bifurcation_detection_overlay_view_a.png",
         "view_a",
+        class_map=class_map_a,
+        confidence_map=confidence_map_a,
     )
     anchors_b = detect_anatomy_anchors(
         branches_b,
@@ -957,6 +1066,8 @@ def main():
         clean_b,
         out / "bifurcation_detection_overlay_view_b.png",
         "view_b",
+        class_map=class_map_b,
+        confidence_map=confidence_map_b,
     )
     write_anchor_outputs(out / "anatomy_anchor_candidates.json", anchors_a, anchors_b)
     write_landmark_debug_outputs(out, anchors_a, anchors_b)

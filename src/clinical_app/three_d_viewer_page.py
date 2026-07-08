@@ -12,8 +12,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,7 +33,7 @@ import vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 import patient_store
-from case_analysis_workflow import lesions_3d_path, reconstruction_obj
+from case_analysis_workflow import lesion_panel_path, lesions_3d_path, reconstruction_dir, reconstruction_obj
 
 
 def _card() -> QFrame:
@@ -51,9 +54,12 @@ class ThreeDViewerPage(QWidget):
         super().__init__(parent)
         self.case_id: Optional[str] = None
         self.package: dict = {}
+        self.pipeline_summary: dict = {}
+        self.lesion_panel_entries: list[dict] = []
         self.last_error = ""
         self.mesh_actor: Optional[vtk.vtkActor] = None
         self.lesion_actors: list[vtk.vtkProp3D] = []
+        self._lesion_id_to_actor_index: dict[str, int] = {}
         self.branch_surfaces: dict[int, dict] = {}
 
         self._build_ui()
@@ -98,29 +104,76 @@ class ThreeDViewerPage(QWidget):
         lesions_header.setProperty("role", "sectionHeader")
         side_layout.addWidget(lesions_header)
 
+        lesions_caption = QLabel(
+            "Moderate/severe stenoses from the clinical report. "
+            "● shown on the 3D model — ○ not in this reconstruction."
+        )
+        lesions_caption.setProperty("role", "captionText")
+        lesions_caption.setWordWrap(True)
+        side_layout.addWidget(lesions_caption)
+
         self.list_lesions = QListWidget()
         self.list_lesions.currentRowChanged.connect(self._on_lesion_selected)
         side_layout.addWidget(self.list_lesions, stretch=2)
 
         self.lbl_lesion_detail = QLabel("Select a lesion marker or list item.")
-        self.lbl_lesion_detail.setProperty("role", "hint")
+        self.lbl_lesion_detail.setProperty("role", "detailText")
         self.lbl_lesion_detail.setWordWrap(True)
         side_layout.addWidget(self.lbl_lesion_detail)
 
-        self.ds_bar = QProgressBar()
-        self.ds_bar.setRange(0, 100)
-        self.ds_bar.setFormat("Diameter stenosis: %p%")
-        side_layout.addWidget(self.ds_bar)
+        # Percentage is drawn in a separate label rather than the progress
+        # bar's own overlaid text: that text is one fixed color across a bar
+        # that's part dark track / part light-green fill, so at high values
+        # (common for DS%) it sat on the green fill and was unreadable.
+        self.ds_bar, self.lbl_ds_value = self._build_metric_row(side_layout, "Diameter stenosis")
+        self.confidence_bar, self.lbl_confidence_value = self._build_metric_row(side_layout, "Confidence")
 
-        self.confidence_bar = QProgressBar()
-        self.confidence_bar.setRange(0, 100)
-        self.confidence_bar.setFormat("Confidence: %p%")
-        side_layout.addWidget(self.confidence_bar)
-
-        self.btn_open_view_report = QPushButton("Open Source View Report")
+        self.btn_open_view_report = QPushButton("Open 2D View Report")
         self.btn_open_view_report.setProperty("variant", "ghost")
+        self.btn_open_view_report.setToolTip(
+            "Opens the original per-view QCA report PDF for the selected lesion's own angiographic view."
+        )
+        self.btn_open_view_report.setEnabled(False)
         self.btn_open_view_report.clicked.connect(self._open_selected_view_report)
         side_layout.addWidget(self.btn_open_view_report)
+        view_report_caption = QLabel("Report for this lesion's own 2D angiographic view.")
+        view_report_caption.setProperty("role", "captionText")
+        side_layout.addWidget(view_report_caption)
+
+        side_layout.addWidget(self._divider())
+
+        source_views_header = QLabel("Source Views")
+        source_views_header.setProperty("role", "sectionHeader")
+        side_layout.addWidget(source_views_header)
+
+        source_views_row = QHBoxLayout()
+        source_views_row.setSpacing(10)
+        self.lbl_view_a_thumb = QLabel()
+        self.lbl_view_b_thumb = QLabel()
+        self.btn_view_a = QPushButton("View A")
+        self.btn_view_b = QPushButton("View B")
+        self.view_button_group = QButtonGroup(self)
+        self.view_button_group.setExclusive(True)
+        for key, thumb, button in (
+            ("view_a", self.lbl_view_a_thumb, self.btn_view_a),
+            ("view_b", self.lbl_view_b_thumb, self.btn_view_b),
+        ):
+            column = QVBoxLayout()
+            column.setSpacing(6)
+            thumb.setFixedSize(150, 150)
+            thumb.setAlignment(Qt.AlignCenter)
+            thumb.setProperty("role", "hint")
+            thumb.setText("Not available")
+            column.addWidget(thumb)
+            button.setCheckable(True)
+            button.setEnabled(False)
+            button.clicked.connect(lambda _checked, k=key: self._set_camera_to_view(k))
+            self.view_button_group.addButton(button)
+            column.addWidget(button)
+            source_views_row.addLayout(column)
+        side_layout.addLayout(source_views_row)
+
+        side_layout.addWidget(self._divider())
 
         views_header = QLabel("Views Used")
         views_header.setProperty("role", "sectionHeader")
@@ -129,14 +182,44 @@ class ThreeDViewerPage(QWidget):
         self.list_views = QListWidget()
         side_layout.addWidget(self.list_views, stretch=1)
 
-        self.btn_open_final_report = QPushButton("Open Final Clinical Report")
+        self.btn_open_final_report = QPushButton("Open Full Clinical Report")
         self.btn_open_final_report.setProperty("variant", "primary")
+        self.btn_open_final_report.setToolTip(
+            "Opens the case's combined clinical report covering every analyzed angiographic view."
+        )
         self.btn_open_final_report.clicked.connect(self._open_final_report)
         side_layout.addWidget(self.btn_open_final_report)
+        final_report_caption = QLabel("Combined report covering every analyzed view for this case.")
+        final_report_caption.setProperty("role", "captionText")
+        side_layout.addWidget(final_report_caption)
 
         splitter.addWidget(side)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
+
+    def _divider(self) -> QFrame:
+        line = QFrame()
+        line.setProperty("role", "divider")
+        line.setFixedHeight(1)
+        return line
+
+    def _build_metric_row(self, layout: QVBoxLayout, label: str) -> tuple[QProgressBar, QLabel]:
+        row = QHBoxLayout()
+        caption = QLabel(label)
+        caption.setProperty("role", "captionText")
+        value = QLabel("--")
+        value.setProperty("role", "metricValue")
+        row.addWidget(caption)
+        row.addStretch(1)
+        row.addWidget(value)
+        layout.addLayout(row)
+
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setTextVisible(False)
+        bar.setFixedHeight(8)
+        layout.addWidget(bar)
+        return bar, value
 
     def load_case(self, case_id: str) -> bool:
         self.last_error = ""
@@ -160,11 +243,31 @@ class ThreeDViewerPage(QWidget):
             self.lbl_status.setText(self.last_error)
             return False
 
+        summary_path = reconstruction_dir(case_id) / "pipeline_summary.json"
+        try:
+            self.pipeline_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            self.pipeline_summary = {}
+
+        panel_path = lesion_panel_path(case_id)
+        try:
+            self.lesion_panel_entries = json.loads(panel_path.read_text(encoding="utf-8")).get("entries", [])
+        except (json.JSONDecodeError, OSError):
+            # Case was reconstructed before this feature existed -- fall back
+            # to exactly today's behavior (every lesions_3d.json entry, all
+            # enabled) instead of showing an empty panel.
+            self.lesion_panel_entries = [
+                {**lesion, "in_3d": True, "lesion_3d_id": lesion.get("lesion_id")}
+                for lesion in self.package.get("lesions", [])
+            ]
+
         try:
             self.lbl_status.setText(f"Loaded case {case_id}: {obj_path.name}")
             self._load_mesh(obj_path)
             self._load_lesions()
+            self._load_lesion_panel()
             self._load_views()
+            self._load_source_views(reconstruction_dir(case_id))
             self.renderer.ResetCamera()
             self.interactor.Initialize()
             QTimer.singleShot(0, self.vtk_widget.GetRenderWindow().Render)
@@ -177,12 +280,23 @@ class ThreeDViewerPage(QWidget):
 
     def _clear_view(self):
         self.package = {}
+        self.pipeline_summary = {}
+        self.lesion_panel_entries = []
+        self._lesion_id_to_actor_index = {}
         self.renderer.RemoveAllViewProps()
         self.list_lesions.clear()
         self.list_views.clear()
         self.lbl_lesion_detail.setText("Select a lesion marker or list item.")
         self.ds_bar.setValue(0)
         self.confidence_bar.setValue(0)
+        self.lbl_ds_value.setText("--")
+        self.lbl_confidence_value.setText("--")
+        self.btn_open_view_report.setEnabled(False)
+        for thumb, button in ((self.lbl_view_a_thumb, self.btn_view_a), (self.lbl_view_b_thumb, self.btn_view_b)):
+            thumb.setPixmap(QPixmap())
+            thumb.setText("Not available")
+            button.setEnabled(False)
+            button.setChecked(False)
         self.vtk_widget.GetRenderWindow().Render()
 
     def _load_mesh(self, obj_path: Path):
@@ -206,26 +320,48 @@ class ThreeDViewerPage(QWidget):
         self.renderer.AddActor(self.mesh_actor)
 
     def _load_lesions(self):
-        self.list_lesions.clear()
+        """Builds the 3D lesion actors from lesions_3d.json (the definitive
+        "what's drawn on the mesh" list). List-widget population is handled
+        separately by _load_lesion_panel(), which shows the broader,
+        all-views MODERATE/SEVERE panel."""
+        self.lesion_actors = []
+        self._lesion_id_to_actor_index = {}
         lesions = self.package.get("lesions", [])
-        for idx, lesion in enumerate(lesions):
+        for lesion in lesions:
             actor = self._make_lesion_actor(lesion)
             if actor is None:
                 continue
             self.renderer.AddActor(actor)
+            lesion_id = lesion.get("lesion_id")
+            if lesion_id is not None:
+                self._lesion_id_to_actor_index[lesion_id] = len(self.lesion_actors)
             self.lesion_actors.append(actor)
 
+    def _load_lesion_panel(self):
+        self.list_lesions.clear()
+        for entry in self.lesion_panel_entries:
+            in_3d = bool(entry.get("in_3d"))
+            marker = "●" if in_3d else "○"
             item = QListWidgetItem(
-                f"{lesion.get('lesion_id')} | {lesion.get('severity')}\n"
-                f"{lesion.get('artery')} | narrowing {float(lesion.get('DS_percent') or 0):.1f}%"
+                f"{marker} {entry.get('view_label', 'View')} | {entry.get('severity')}\n"
+                f"{entry.get('artery')} | narrowing {float(entry.get('DS_percent') or 0):.1f}%"
+                + ("" if in_3d else "  (not in 3D view)")
             )
-            item.setData(Qt.UserRole, lesion)
+            item.setData(Qt.UserRole, entry)
+            if not in_3d:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+                item.setForeground(QColor("#5C6067"))
             self.list_lesions.addItem(item)
 
-        if lesions:
-            self.list_lesions.setCurrentRow(0)
+        first_enabled = next((i for i, e in enumerate(self.lesion_panel_entries) if e.get("in_3d")), -1)
+        if first_enabled >= 0:
+            self.list_lesions.setCurrentRow(first_enabled)
         else:
-            self.lbl_lesion_detail.setText("No stenosis lesions were saved for this case.")
+            self.lbl_lesion_detail.setText(
+                "No stenosis lesions were saved for this case."
+                if not self.lesion_panel_entries
+                else "No lesions from the selected views are represented in this 3D reconstruction."
+            )
 
     def _parse_obj_branch_surfaces(self, obj_path: Path) -> dict[int, dict]:
         vertices: list[tuple[float, float, float]] = []
@@ -368,27 +504,132 @@ class ThreeDViewerPage(QWidget):
                 f"{view.get('lesion_count', 0)} lesion(s) | {view.get('n_frames_analyzed', 0)} frames"
             ))
 
+    @staticmethod
+    def _find_source_image(recon_dir: Path, view_key: str) -> Optional[Path]:
+        """Prefers the plain angiogram frame over the segmentation overlay.
+        The original is written by scripts/dicom_3d_pipeline.py into the
+        02_pipeline/ stage subfolder, which is retained under
+        reconstruction_3d/ -- not copied to the top level (unlike the
+        overlay/mask images), so look there too."""
+        candidates = [
+            recon_dir / f"{view_key}_original.png",
+            recon_dir / "02_pipeline" / f"{view_key}_original.png",
+            recon_dir / f"{view_key}_overlay.png",
+        ]
+        return next((path for path in candidates if path.exists()), None)
+
+    def _load_source_views(self, recon_dir: Path):
+        for key, thumb, button in (
+            ("view_a", self.lbl_view_a_thumb, self.btn_view_a),
+            ("view_b", self.lbl_view_b_thumb, self.btn_view_b),
+        ):
+            has_angle = isinstance(self.pipeline_summary.get(key), dict)
+            image_path = self._find_source_image(recon_dir, key)
+            pixmap = QPixmap(str(image_path)) if image_path is not None else QPixmap()
+            if pixmap.isNull():
+                thumb.setPixmap(QPixmap())
+                thumb.setText("Not available")
+                button.setEnabled(False)
+                button.setChecked(False)
+                continue
+            thumb.setPixmap(pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            thumb.setText("")
+            button.setEnabled(has_angle)
+            button.setChecked(False)
+
+    @staticmethod
+    def _rotation_from_angles(primary_deg: float, secondary_deg: float) -> np.ndarray:
+        """Same DICOM positioner-angle rotation used to build the mesh
+        (scripts/dicom_3d_pipeline.py::rotation_from_angles) and to jump the
+        standalone viewer's camera to a saved angle
+        (src/artery_3d_vtk_viewer.py::rotation_from_angles)."""
+        primary = math.radians(primary_deg)
+        secondary = math.radians(secondary_deg)
+        cp, sp = math.cos(primary), math.sin(primary)
+        cs, ss = math.cos(secondary), math.sin(secondary)
+        rotate_primary = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+        rotate_secondary = np.array([[1.0, 0.0, 0.0], [0.0, cs, -ss], [0.0, ss, cs]])
+        return rotate_primary @ rotate_secondary
+
+    def _set_camera_to_view(self, key: str):
+        view = self.pipeline_summary.get(key)
+        if not isinstance(view, dict) or self.mesh_actor is None:
+            return
+        try:
+            primary = float(view.get("primary_angle_deg", 0.0))
+            secondary = float(view.get("secondary_angle_deg", 0.0))
+        except (TypeError, ValueError):
+            return
+
+        bounds = [0.0] * 6
+        self.renderer.ComputeVisiblePropBounds(bounds)
+        if not all(math.isfinite(v) for v in bounds) or bounds[0] > bounds[1] or bounds[2] > bounds[3] or bounds[4] > bounds[5]:
+            bounds = [-50.0, 50.0, -50.0, 50.0, -50.0, 50.0]
+        center = np.array([(bounds[0] + bounds[1]) * 0.5, (bounds[2] + bounds[3]) * 0.5, (bounds[4] + bounds[5]) * 0.5])
+        span = max(bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4], 1.0)
+
+        rotation = self._rotation_from_angles(primary, secondary)
+        # Local +Z is the X-ray propagation direction (source -> detector) and
+        # local +Y is the detector's own row axis (positive = further DOWN the
+        # image, per scripts/epipolar_optimized_centerline.py::project_points,
+        # the same trusted formula used to validate reconstruction accuracy).
+        # A VTK camera's "up" is a screen-space-up vector and its "direction"
+        # is source->detector, so both need the opposite sign from local
+        # +Z/+Y: verified against project_points on real cases -- using
+        # local +Z/+Y directly (no negation) renders the model vertically
+        # flipped relative to the original angiogram.
+        direction = rotation @ np.array([0.0, 0.0, 1.0])
+        up = rotation @ np.array([0.0, -1.0, 0.0])
+        direction = direction / max(np.linalg.norm(direction), 1e-9)
+        up = up - direction * float(np.dot(up, direction))
+        up_norm = np.linalg.norm(up)
+        up = up / up_norm if up_norm > 1e-6 else np.array([0.0, 1.0, 0.0])
+
+        camera_position = center - direction * span * 3.0
+        camera = self.renderer.GetActiveCamera()
+        camera.ParallelProjectionOn()
+        camera.SetFocalPoint(*center)
+        camera.SetPosition(*camera_position)
+        camera.SetViewUp(*up)
+        camera.SetParallelScale(span * 0.62)
+        self.renderer.ResetCameraClippingRange()
+        self.vtk_widget.GetRenderWindow().Render()
+
     def _on_lesion_selected(self, row: int):
         if row < 0:
             return
-        for i, actor in enumerate(self.lesion_actors):
-            self._set_prop_opacity(actor, 1.0 if i == row else 0.42)
-
         item = self.list_lesions.item(row)
-        lesion = item.data(Qt.UserRole)
+        if item is None:
+            return
+        entry = item.data(Qt.UserRole)
+        if not entry or not entry.get("in_3d"):
+            # Disabled panel rows shouldn't normally become current, but
+            # guard anyway rather than highlight a stale actor selection.
+            self.btn_open_view_report.setEnabled(False)
+            return
+
+        actor_index = self._lesion_id_to_actor_index.get(entry.get("lesion_3d_id"))
+        for i, actor in enumerate(self.lesion_actors):
+            self._set_prop_opacity(actor, 1.0 if i == actor_index else 0.42)
+
         detail = (
-            f"{lesion.get('lesion_id')} - {lesion.get('severity')}\n"
-            f"Artery: {lesion.get('artery')} / {lesion.get('label')}\n"
-            f"DS: {float(lesion.get('DS_percent') or 0):.1f}%\n"
-            f"MLD: {lesion.get('MLD_mm') or lesion.get('MLD_px')} | "
-            f"RVD: {lesion.get('RVD_mm') or lesion.get('RVD_px')}\n"
-            f"Confidence: {lesion.get('confidence')}\n"
-            f"Source view: {lesion.get('view_label')}"
+            f"{entry.get('lesion_3d_id')} - {entry.get('severity')}\n"
+            f"Artery: {entry.get('artery')} / {entry.get('label')}\n"
+            f"DS: {float(entry.get('DS_percent') or 0):.1f}%\n"
+            f"MLD: {entry.get('MLD_mm') or entry.get('MLD_px')} | "
+            f"RVD: {entry.get('RVD_mm') or entry.get('RVD_px')}\n"
+            f"Confidence: {entry.get('confidence')}\n"
+            f"Source view: {entry.get('view_label')}"
         )
         self.lbl_lesion_detail.setText(detail)
-        self.ds_bar.setValue(max(0, min(100, int(round(float(lesion.get("DS_percent") or 0))))))
-        conf = lesion.get("confidence")
-        self.confidence_bar.setValue(max(0, min(100, int(round(float(conf or 0) * 100)))))
+        ds_value = max(0, min(100, int(round(float(entry.get("DS_percent") or 0)))))
+        self.ds_bar.setValue(ds_value)
+        self.lbl_ds_value.setText(f"{ds_value}%")
+        conf = entry.get("confidence")
+        conf_value = max(0, min(100, int(round(float(conf or 0) * 100))))
+        self.confidence_bar.setValue(conf_value)
+        self.lbl_confidence_value.setText(f"{conf_value}%" if conf is not None else "--")
+        self.btn_open_view_report.setEnabled(bool(entry.get("view_report")))
         self.vtk_widget.GetRenderWindow().Render()
 
     def _open_selected_view_report(self):

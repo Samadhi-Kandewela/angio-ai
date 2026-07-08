@@ -109,6 +109,23 @@ def build_stylesheet() -> str:
         color: {ASH_DIM};
         font-size: 10.5px;
     }}
+    QLabel[role="detailText"] {{
+        color: {WHITE};
+        font-size: 13px;
+    }}
+    QLabel[role="captionText"] {{
+        color: {ASH};
+        font-size: 10.5px;
+    }}
+    QLabel[role="metricValue"] {{
+        color: {WHITE};
+        font-size: 13px;
+        font-weight: 700;
+    }}
+    QFrame[role="divider"] {{
+        background-color: {BORDER};
+        border: none;
+    }}
     QLabel[role="fieldLabel"] {{
         color: {ASH};
         font-size: 11.5px;

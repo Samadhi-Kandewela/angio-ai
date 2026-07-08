@@ -234,4 +234,8 @@ plot_*.py
 !/checkpoints/**/*.onnx
 !/checkpoints/**/*.pth
 patient_data/
+
+rename_data_images.py
+my_3d_reconstruction*
+create_branch_mapping_images.py
 checkpoints/

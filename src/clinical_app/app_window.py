@@ -2,9 +2,7 @@
 Main window shell: a left navigation rail plus a stacked content area.
 
 "New Patient", "Patient Records", "DICOM Analysis", "ECG Analysis",
-"Live Stream Analysis", and "3D Viewer" are implemented. "Reports" and
-"Settings" remain disabled placeholders -- this shell is the scaffold they
-plug into as they're built in later iterations.
+"Live Stream Analysis", and "3D Viewer" are implemented.
 """
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -19,7 +17,7 @@ from three_d_viewer_page import ThreeDViewerPage
 from ecg_analysis_page import EcgAnalysisPage
 from live_stream_page import LiveStreamPage
 
-# (label, enabled) -- enabled rows get a real page; disabled ones are future work.
+# (label, enabled) -- enabled rows get a real page.
 NAV_ITEMS = [
     ("New Patient", True),
     ("Patient Records", True),
@@ -27,8 +25,6 @@ NAV_ITEMS = [
     ("ECG Analysis", True),
     ("Live Stream Analysis", True),
     ("3D Viewer", True),
-    ("Reports", False),
-    ("Settings", False),
 ]
 
 

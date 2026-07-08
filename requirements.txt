@@ -17,4 +17,8 @@ scikit-image
 onnx
 thop
 graphviz
+pydicom
+pylibjpeg
+pylibjpeg-libjpeg
+pylibjpeg-openjpeg
 adjustText

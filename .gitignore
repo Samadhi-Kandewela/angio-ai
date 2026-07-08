@@ -6,7 +6,26 @@ __pycache__/
 # C extensions
 *.so
 
+checkpoints/
+*.pth
+*.onnx
+
 #3d middle folders/
+paper_text_extracts/
+raw_images/
+create_raw_images.py
+case003*
+coronario/
+3d reconstruction papers/
+3d angio/
+instances_default.json
+reconstructions/
+dicom_case003*
+dicom_sample*
+prior*
+anatomy_first*
+anatomy_anchor_epipolar_smoke/
+ostium_lm_anchor_smoke/
 dicom_auto_selection/
 dicom_auto_selection_fast/
 dicom_auto_selection_final/
@@ -33,8 +52,11 @@ dicom_ranked_reconstructions/
 dicom_full_tree_hybrid/
 dicom_2d_reference_trees/
 dicom_case_3d_reconstructions/
+dicom_case_plan*/
+dicom_case_reconstruction*/
 
 # Distribution / packaging
+checkpoints/
 angio only/
 3d_papers/
 dicom_sample/
@@ -141,7 +163,7 @@ dmypy.json
 # Project-specific Data & Checkpoints
 dataset/
 dataset_augmented/
-# checkpoints/
+checkpoints/
 local_data/
 wandb/
 exports/
@@ -221,6 +243,7 @@ plot_*.py
 /dicom_pipeline_output_v2/
 /dicom_preview/
 /dicom_selected_segmentation/
+/dicom_verify*
 
 # Local outputs / debug folders
 /src/ecg_output/
@@ -229,9 +252,13 @@ plot_*.py
 /src/qca_validation/
 
 # Allow specific checkpoints/models to be tracked/pushed
-!/checkpoints/
-/checkpoints/**/*.zip
-!/checkpoints/**/*.onnx
-!/checkpoints/**/*.pth
+# !/checkpoints/
+# /checkpoints/**/*.zip
+# !/checkpoints/**/*.onnx
+# !/checkpoints/**/*.pth
 patient_data/
+
+rename_data_images.py
+my_3d_reconstruction*
+create_branch_mapping_images.py
 checkpoints/

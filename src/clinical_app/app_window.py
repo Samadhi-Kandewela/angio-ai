@@ -1,32 +1,34 @@
 """
 Main window shell: a left navigation rail plus a stacked content area.
 
-"New Patient", "Local DICOM Analysis", and "ECG Analysis" are implemented.
-Live Stream Analysis, 3D Viewer, and Settings remain disabled placeholders --
-this shell is the scaffold they plug into as they're built in later
-iterations.
+"New Patient" and "Local DICOM Analysis" are implemented. Live Stream
+Analysis and 3D Viewer are implemented. Live Stream Analysis, Reports, and
+Settings remain disabled placeholders -- this shell is the scaffold they plug
+into as they're built in later iterations.
 """
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QStackedWidget, QFrame
+    QListWidget, QListWidgetItem, QStackedWidget, QFrame, QMessageBox, QApplication
 )
 
 from patient_intake_page import PatientIntakePage
 from patient_records_page import PatientRecordsPage
 from local_dicom_analysis_page import LocalDicomAnalysisPage
+from three_d_viewer_page import ThreeDViewerPage
 from ecg_analysis_page import EcgAnalysisPage
 from live_stream_page import LiveStreamPage
+
 
 # (label, enabled) -- enabled rows get a real page; disabled ones are future work.
 NAV_ITEMS = [
     ("New Patient", True),
     ("Patient Records", True),
     ("DICOM Analysis", True),
+    ("Live Stream Analysis", False),
+    ("3D Viewer", True),
     ("ECG Analysis", True),
     ("Live Stream Analysis", True),
-    ("3D Viewer", False),
-    ("Settings", False),
 ]
 
 
@@ -58,6 +60,8 @@ class AppWindow(QMainWindow):
 
         self.dicom_analysis_page = LocalDicomAnalysisPage()
         self.dicom_analysis_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(0))
+        self.dicom_analysis_page.view_3d_requested.connect(self._open_3d_viewer_for_case)
+        self._add_page(1, self.dicom_analysis_page)
         self._add_page(2, self.dicom_analysis_page)
 
         self.ecg_analysis_page = EcgAnalysisPage()
@@ -66,6 +70,9 @@ class AppWindow(QMainWindow):
 
         self.live_stream_page = LiveStreamPage()
         self._add_page(4, self.live_stream_page)
+
+        self.three_d_viewer_page = ThreeDViewerPage()
+        self._add_page(3, self.three_d_viewer_page)
 
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
 
@@ -130,6 +137,16 @@ class AppWindow(QMainWindow):
     def _on_go_to_dicom_analysis(self, case_id: str):
         self.nav_list.setCurrentRow(2)
         self.dicom_analysis_page.select_case_by_id(case_id)
+
+    def _open_3d_viewer_for_case(self, case_id: str):
+        self.nav_list.setCurrentRow(3)
+        QApplication.processEvents()
+        if self.three_d_viewer_page.load_case(case_id):
+            self.statusBar().showMessage(f"3D Viewer loaded case: {case_id}")
+        else:
+            message = self.three_d_viewer_page.last_error or f"3D reconstruction is not ready for case: {case_id}"
+            self.statusBar().showMessage(message)
+            QMessageBox.warning(self, "3D Viewer", message)
 
     def closeEvent(self, event):
         self.dicom_analysis_page.shutdown()

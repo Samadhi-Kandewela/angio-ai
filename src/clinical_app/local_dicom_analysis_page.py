@@ -15,8 +15,8 @@ import cv2
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap, QFont
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QSlider, QPushButton, QFrame, QListWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
+    QComboBox, QSlider, QPushButton, QFrame, QFileDialog, QListWidget,
     QListWidgetItem, QCheckBox, QMessageBox, QSizePolicy, QScrollArea
 )
 
@@ -25,6 +25,8 @@ import analysis_results_store
 from dicom_loader import discover_series, load_series_frames
 from dicom_analysis_thread import DicomAnalysisThread
 from frame_pipeline import SegmentationModel, LocalizationModel
+from report_engine import analyze_frame_list
+from case_analysis_workflow import CaseAnalysisWorkflowThread, is_3d_ready, read_status
 from report_engine import KEY_FRAME_MAX_COUNT, analyze_frame_list, draw_frame_stenosis_only
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # angio-ai/
@@ -128,6 +130,7 @@ class LocalDicomAnalysisPage(QWidget):
     """DICOM-file analysis page: case/series picker + AI-model viewer."""
 
     go_to_new_patient = Signal()
+    view_3d_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -140,6 +143,8 @@ class LocalDicomAnalysisPage(QWidget):
         self._pending_case_id = None
         self._last_view_report = None
         self._last_final_report = None
+        self._case_workflow_thread = None
+        self._ready_3d_case_id = None
         self._current_angle_result = None
         self._current_key_frame_page = 0
         self.analysis_thread = DicomAnalysisThread()
@@ -219,19 +224,17 @@ class LocalDicomAnalysisPage(QWidget):
 
         v.addWidget(_field_label("DICOM Series"))
         self.list_series = QListWidget()
-        self.list_series.setFixedHeight(72)
+        self.list_series.setObjectName("seriesList")
+        self.list_series.setMinimumHeight(220)
+        self.list_series.setAlternatingRowColors(True)
+        self.list_series.currentRowChanged.connect(self._on_series_selected)
+        self.list_series.itemDoubleClicked.connect(lambda _item: self._load_selected_series())
         v.addWidget(self.list_series)
-
-        btn_row = QHBoxLayout()
-        self.btn_load_series = QPushButton("Load Series")
-        self.btn_load_series.setProperty("variant", "primary")
-        self.btn_load_series.clicked.connect(self._load_selected_series)
-        btn_row.addWidget(self.btn_load_series)
 
         self.lbl_series_status = QLabel("No series loaded.")
         self.lbl_series_status.setProperty("role", "hint")
-        btn_row.addWidget(self.lbl_series_status, stretch=1)
-        v.addLayout(btn_row)
+        self.lbl_series_status.setWordWrap(True)
+        v.addWidget(self.lbl_series_status)
 
         return card
 
@@ -384,6 +387,12 @@ class LocalDicomAnalysisPage(QWidget):
         header.setProperty("role", "sectionHeader")
         v.addWidget(header)
 
+        label_row = QHBoxLayout()
+        label_row.addWidget(_field_label("View Label"))
+        self.txt_view_label = QLineEdit()
+        self.txt_view_label.setPlaceholderText("Example: RAO 30 / CRA 20")
+        label_row.addWidget(self.txt_view_label, stretch=1)
+        v.addLayout(label_row)
         hint = QLabel(
             "Analyzing the full series aggregates stenosis detections across every frame into one "
             "authoritative reading per lesion (not a single noisy frame) and saves the result into "
@@ -396,7 +405,7 @@ class LocalDicomAnalysisPage(QWidget):
         v.addWidget(hint)
 
         row1 = QHBoxLayout()
-        self.btn_save_view = QPushButton("Save Results && Generate View Report")
+        self.btn_save_view = QPushButton("Analyze Full Series && Save View Report")
         self.btn_save_view.setProperty("variant", "primary")
         self.btn_save_view.clicked.connect(self._save_view_results)
         row1.addWidget(self.btn_save_view)
@@ -413,7 +422,22 @@ class LocalDicomAnalysisPage(QWidget):
         self.lbl_save_status.setWordWrap(True)
         v.addWidget(self.lbl_save_status)
 
+        saved_header = QLabel("Saved views for this case")
+        saved_header.setProperty("role", "fieldLabel")
+        v.addWidget(saved_header)
+
+        self.list_saved_views = QListWidget()
+        self.list_saved_views.setObjectName("savedViewsList")
+        self.list_saved_views.setMinimumHeight(118)
+        self.list_saved_views.itemDoubleClicked.connect(lambda _item: self._open_selected_view_report())
+        v.addWidget(self.list_saved_views)
+
         row2 = QHBoxLayout()
+        self.btn_open_selected_view_report = QPushButton("Open Selected View Report")
+        self.btn_open_selected_view_report.setProperty("variant", "ghost")
+        self.btn_open_selected_view_report.clicked.connect(self._open_selected_view_report)
+        row2.addWidget(self.btn_open_selected_view_report)
+
         self.btn_final_report = QPushButton("Generate Final Clinical Report")
         self.btn_final_report.setEnabled(False)
         self.btn_final_report.clicked.connect(self._generate_final_report)
@@ -430,6 +454,24 @@ class LocalDicomAnalysisPage(QWidget):
         self.lbl_final_status.setProperty("role", "hint")
         self.lbl_final_status.setWordWrap(True)
         v.addWidget(self.lbl_final_status)
+
+        row3 = QHBoxLayout()
+        self.btn_run_3d = QPushButton("Run 3D Reconstruction")
+        self.btn_run_3d.setProperty("variant", "ghost")
+        self.btn_run_3d.clicked.connect(self._run_3d_for_current_case)
+        row3.addWidget(self.btn_run_3d)
+
+        self.btn_view_3d = QPushButton("View 3D View")
+        self.btn_view_3d.setProperty("variant", "primary")
+        self.btn_view_3d.setEnabled(False)
+        self.btn_view_3d.clicked.connect(self._open_3d_view)
+        row3.addWidget(self.btn_view_3d)
+
+        self.lbl_3d_status = QLabel("3D reconstruction has not started for this case.")
+        self.lbl_3d_status.setProperty("role", "hint")
+        self.lbl_3d_status.setWordWrap(True)
+        row3.addWidget(self.lbl_3d_status, stretch=1)
+        v.addLayout(row3)
 
         return card
 
@@ -692,12 +734,20 @@ class LocalDicomAnalysisPage(QWidget):
     def _on_case_selected(self, index: int):
         self.list_series.clear()
         self._series = []
+        self._series_frames = []
+        self._last_view_report = None
+        self._last_final_report = None
+        if hasattr(self, "txt_view_label"):
+            self.txt_view_label.clear()
+        if hasattr(self, "btn_open_view_report"):
+            self.btn_open_view_report.setVisible(False)
         if index < 0 or index >= len(self._cases):
             return
 
         case_id = self._cases[index]["case_id"]
         dicom_dir = patient_store.get_case_dicom_dir(case_id)
         self._refresh_final_report_status()
+        self._refresh_3d_status(case_id)
         if not dicom_dir.exists():
             self.lbl_series_status.setText(f"No dicom/ folder found for case {case_id}.")
             return
@@ -710,16 +760,37 @@ class LocalDicomAnalysisPage(QWidget):
         for s in self._series:
             rel = s.path.relative_to(dicom_dir)
             frame_word = "frame" if s.num_frames == 1 else "frames"
-            self.list_series.addItem(QListWidgetItem(f"{rel} — {s.description} — {s.num_frames} {frame_word}"))
-        self.lbl_series_status.setText(f"{len(self._series)} series found. Select one and press Load Series.")
+            item = QListWidgetItem(f"{rel}\n{s.description} | {s.num_frames} {frame_word}")
+            item.setToolTip(str(s.path))
+            self.list_series.addItem(item)
+        self.list_series.setCurrentRow(0)
+        self.lbl_series_status.setText(f"{len(self._series)} series found. Select a series to load it automatically.")
+        if is_3d_ready(case_id):
+            self._refresh_3d_status(case_id)
+        else:
+            self.lbl_3d_status.setText(
+                "3D reconstruction is not ready yet. Generate/save reports first, then run reconstruction."
+            )
 
-    def _load_selected_series(self):
+    def _on_series_selected(self, row: int):
+        if row < 0 or row >= len(self._series):
+            return
+        series = self._series[row]
+        if hasattr(self, "txt_view_label"):
+            self.txt_view_label.setText(series.description or series.path.stem)
+        self._load_selected_series(auto=True)
+
+    def _load_selected_series(self, auto: bool = False):
+        if self._series_load_thread is not None and self._series_load_thread.isRunning():
+            if not auto:
+                self.lbl_series_status.setText("A series is already loading. Please wait.")
+            return
+
         row = self.list_series.currentRow()
         if row < 0 or row >= len(self._series):
             self.lbl_series_status.setText("Select a series from the list first.")
             return
 
-        self.btn_load_series.setEnabled(False)
         self.lbl_series_status.setText("Loading series...")
 
         series_info = self._series[row]
@@ -729,7 +800,6 @@ class LocalDicomAnalysisPage(QWidget):
         self._series_load_thread.start()
 
     def _on_series_loaded(self, frames):
-        self.btn_load_series.setEnabled(True)
         self._series_frames = frames
         self.analysis_thread.set_frames(frames)
 
@@ -740,6 +810,7 @@ class LocalDicomAnalysisPage(QWidget):
         self.lbl_frame_count.setText(f"Frame 1 / {len(frames)}")
 
         self.lbl_series_status.setText(f"Loaded {len(frames)} frames. Ready to analyze.")
+        self.lbl_save_status.setText("Ready to analyze the full loaded series and save a view report.")
         self._set_playback_enabled(self.analysis_thread.seg_model is not None)
         if self.analysis_thread.seg_model is not None:
             self.analysis_thread.seek(0)
@@ -750,7 +821,6 @@ class LocalDicomAnalysisPage(QWidget):
         self.lbl_key_frame_coverage.setText("Play through the series once to see key frames here.")
 
     def _on_series_load_error(self, message: str):
-        self.btn_load_series.setEnabled(True)
         self.lbl_series_status.setText(f"Failed to load series: {message}")
         QMessageBox.warning(self, "Series Load Failed", message)
 
@@ -1018,18 +1088,127 @@ class LocalDicomAnalysisPage(QWidget):
         case = self._current_case()
         if case is None:
             self.btn_final_report.setEnabled(False)
+            self.btn_open_selected_view_report.setEnabled(False)
+            self.list_saved_views.clear()
             self.lbl_final_status.setText("Select a patient case first.")
             return
 
         analysis_dir = patient_store.get_case_analysis_dir(case["case_id"])
         views = analysis_results_store.list_view_results(analysis_dir)
         self.btn_final_report.setEnabled(len(views) > 0)
+        self.btn_open_selected_view_report.setEnabled(len(views) > 0)
         self.btn_open_final_report.setVisible(False)
+        self.list_saved_views.clear()
+        for view in views:
+            lesions = len(view.get("lesions", []))
+            frames = view.get("n_frames_analyzed", 0)
+            item = QListWidgetItem(f"{view.get('view_label', 'View')}\n{lesions} lesion(s) | {frames} frames analyzed")
+            item.setData(Qt.UserRole, str(Path(view["_view_dir"]) / "view_report.pdf"))
+            self.list_saved_views.addItem(item)
+        if views:
+            self.list_saved_views.setCurrentRow(0)
         if views:
             names = ", ".join(v["view_label"] for v in views)
             self.lbl_final_status.setText(f"{len(views)} view(s) saved for this case: {names}")
         else:
             self.lbl_final_status.setText("No views saved yet for this case.")
+
+    def _open_selected_view_report(self):
+        item = self.list_saved_views.currentItem()
+        if item is None:
+            return
+        report_path = item.data(Qt.UserRole)
+        if report_path and hasattr(os, "startfile"):
+            try:
+                os.startfile(report_path)
+            except OSError:
+                pass
+
+    def _refresh_3d_status(self, case_id: str):
+        ready = is_3d_ready(case_id)
+        self.btn_view_3d.setEnabled(ready)
+        self.btn_run_3d.setEnabled(not ready)
+        self._ready_3d_case_id = case_id if ready else None
+        status = read_status(case_id)
+        if ready:
+            self.lbl_3d_status.setText("3D reconstruction is ready.")
+        elif status:
+            self.lbl_3d_status.setText(status.get("message", "3D reconstruction is not ready yet."))
+        else:
+            self.lbl_3d_status.setText("3D reconstruction will start automatically for this case.")
+
+    def _start_case_workflow(self, case_id: str):
+        if is_3d_ready(case_id):
+            self._refresh_3d_status(case_id)
+            return
+        if self._case_workflow_thread is not None and self._case_workflow_thread.isRunning():
+            self.lbl_3d_status.setText("A case-level analysis/reconstruction workflow is already running.")
+            return
+
+        self.btn_run_3d.setEnabled(False)
+        self.btn_view_3d.setEnabled(False)
+        self.lbl_3d_status.setText("Starting automatic reports and 3D reconstruction...")
+        self._case_workflow_thread = CaseAnalysisWorkflowThread(
+            case_id=case_id,
+            seg_model_path=self.txt_seg_model.text().strip(),
+            loc_model_path=self.txt_loc_model.text().strip(),
+            threshold=self.analysis_thread.threshold,
+            qca_cfg=self.analysis_thread.qca_cfg,
+            parent=self,
+        )
+        self._case_workflow_thread.progress.connect(self.lbl_3d_status.setText)
+        self._case_workflow_thread.status_changed.connect(self._on_case_workflow_status)
+        self._case_workflow_thread.ready.connect(self._on_case_workflow_ready)
+        self._case_workflow_thread.error.connect(self._on_case_workflow_error)
+        self._case_workflow_thread.start()
+
+    def _run_3d_for_current_case(self):
+        case = self._current_case()
+        if case is None:
+            self.lbl_3d_status.setText("Select a patient case first.")
+            return
+        self._start_case_workflow(case["case_id"])
+
+    def _on_case_workflow_status(self, status: dict):
+        current = self._current_case()
+        if (
+            current is not None
+            and status.get("case_id") == current.get("case_id")
+            and status.get("state") == "ready_for_3d_view"
+        ):
+            self._ready_3d_case_id = current["case_id"]
+            self.btn_view_3d.setEnabled(True)
+
+    def _on_case_workflow_ready(self, case_id: str):
+        current = self._current_case()
+        if current is None or current.get("case_id") != case_id:
+            return
+        self._ready_3d_case_id = case_id
+        self.btn_run_3d.setEnabled(False)
+        self.btn_view_3d.setEnabled(True)
+        self.lbl_3d_status.setText("3D reconstruction is ready.")
+        self._refresh_final_report_status()
+
+    def _on_case_workflow_error(self, message: str):
+        self.btn_run_3d.setEnabled(True)
+        self.btn_view_3d.setEnabled(False)
+        self.lbl_3d_status.setText(f"3D workflow failed: {message}")
+
+    def _open_3d_view(self):
+        current = self._current_case()
+        case_id = current.get("case_id") if current is not None else self._ready_3d_case_id
+        if not case_id or not is_3d_ready(case_id):
+            self.btn_view_3d.setEnabled(False)
+            self.lbl_3d_status.setText("3D reconstruction is not ready for this selected case yet.")
+            return
+        self._ready_3d_case_id = case_id
+        self.lbl_3d_status.setText(f"Opening 3D viewer for case {case_id}...")
+
+        main_window = self.window()
+        if hasattr(main_window, "_open_3d_viewer_for_case"):
+            main_window._open_3d_viewer_for_case(case_id)
+        else:
+            self.view_3d_requested.emit(case_id)
 
     def _generate_final_report(self):
         case = self._current_case()
@@ -1062,6 +1241,9 @@ class LocalDicomAnalysisPage(QWidget):
 
     # ── Cleanup ──────────────────────────────────────────────────────
     def shutdown(self):
+        if self._case_workflow_thread is not None and self._case_workflow_thread.isRunning():
+            self._case_workflow_thread.cancel()
+            self._case_workflow_thread.wait(3000)
         self.analysis_thread.stop()
         self.analysis_thread.wait()
 

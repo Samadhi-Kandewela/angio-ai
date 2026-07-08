@@ -53,6 +53,7 @@ if SRC_DIR not in sys.path:
 from qca import (
     QCAConfig, to_binary_mask, morph_cleanup, qca_from_mask, draw_overlay
 )
+from frame_pipeline import run_qca_frame
 from localization import anatomy_logits_to_map_and_confidence, localize_lesions
 
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
@@ -62,6 +63,9 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.pth"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.onnx"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_best.onnx"),
@@ -373,20 +377,21 @@ class VideoThread(QThread):
         Returns (qca_overlay_bgr, stenosis_info_str) or (None, "") on failure.
         """
         try:
-            bw = to_binary_mask(mask_binary_uint8)
-            bw = morph_cleanup(bw, self._qca_cfg)
-
-            # Check if mask has enough content for QCA
-            if np.sum(bw > 0) < self._qca_cfg.min_component_pixels:
-                return None, ""
-
-            branches, lesions, dt = qca_from_mask(bw, self._qca_cfg)
+            # run_qca_frame (frame_pipeline.py) consolidates mask cleanup +
+            # QCA + localization merging into one call -- also used by
+            # report_engine.py's whole-video analysis, so this preview path
+            # and the offline report stay in sync. This file still manages
+            # the localization model as a raw ONNX/torch session (no
+            # LocalizationModel wrapper), so use_merged_labels is left at
+            # its default rather than referencing a wrapper attribute that
+            # doesn't exist here.
+            branches, lesions, dt, bw = run_qca_frame(
+                original_gray, mask_binary_uint8, self._qca_cfg,
+                class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+            )
 
             if not branches:
                 return None, ""
-
-            if self._loc_class_map is not None and self._loc_confidence_map is not None and lesions:
-                lesions = localize_lesions(lesions, self._loc_class_map, self._loc_confidence_map, radius=9)
 
             # draw_overlay expects BGR input
             qca_vis = draw_overlay(original_gray, bw, branches, lesions)

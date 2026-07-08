@@ -34,6 +34,16 @@ class QCAConfig:
     ref_win_dist: int = 40                   # points after lesion for RVD estimate
     min_lesion_points: int = 3               # minimum centerline span to count as a lesion
 
+    # A lesion minimum sitting too close to a branch's own start/end is
+    # usually sitting in the transition zone into/out of a parent vessel at a
+    # bifurcation, not a true focal stenosis -- excluded via min_edge_margin.
+    # Likewise, a reference window with too few points on a side falls back to
+    # (or gets contaminated by) that same transition zone; min_ref_points_per_side
+    # requires a properly-established run of the branch's OWN caliber before
+    # trusting that side's points, rather than accepting as few as 3.
+    min_edge_margin: int = 10                 # px from a branch's own start/end excluded from lesion candidates
+    min_ref_points_per_side: int = 10         # min points needed on a side before it contributes to the reference
+
     # Severity thresholds — four-tier scheme per the JACIT/ARC-2 hierarchical
     # consensus (QCA_CAL.md): repeat revascularization is clinically indicated
     # for (1) DS > 50% WITH recurrent symptoms or a positive functional test,
@@ -50,7 +60,12 @@ class QCAConfig:
 
     min_branch_len: int = 15                 # minimum branch length (skeleton px) to analyze
 
-    px_to_mm: Optional[float] = None         # set if you have calibration (mm per pixel)
+    # mm per pixel. Defaults to the JACIT consensus value for the standard
+    # catheter/isocenter technique (QCA_CAL.md: "recommended calibration
+    # factor for standard analysis software is 0.20 +/- 0.02 mm/pixel");
+    # override with a case-specific measurement (see calibrate_from_catheter)
+    # when one is available.
+    px_to_mm: Optional[float] = 0.20
     # JACIT-recommended calibration range for the standard catheter/isocenter
     # technique (QCA_CAL.md); used to sanity-check a supplied px_to_mm.
     px_to_mm_min: float = 0.18
@@ -745,6 +760,15 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
     ref_cap = branch_median_dt * 2.0        # reference ceiling in smoothed-diameter space
 
     for m in minima:
+        # Skip minima too close to a branch's own start/end — these usually sit
+        # in the transition zone into/out of a parent vessel at a bifurcation
+        # (skeleton degree transitions, natural tapering at tips), not a true
+        # focal stenosis, and any reference window built near there risks being
+        # contaminated by the wider parent vessel's diameter.
+        edge_margin = max(cfg.min_edge_margin, cfg.min_lesion_points)
+        if m < edge_margin or m > N - 1 - edge_margin:
+            continue
+
         left0 = max(0, m - cfg.ref_win_prox)
         right0 = min(N - 1, m + cfg.ref_win_dist)
         prox_avail = m - left0
@@ -753,19 +777,25 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
         # Reference diameter: healthy vessel on EITHER side of the lesion.
         # Values above ref_cap are catheter / aortic territory and are excluded.
         # Per clinical consensus, reference = adjacent healthy-segment diameter.
+        # A side only contributes once it has enough points to represent the
+        # branch's OWN established caliber (min_ref_points_per_side) -- a
+        # handful of points right next to the lesion is usually still inside
+        # the same contaminated transition zone the edge_margin check above
+        # is guarding against.
         ref_candidates: List[float] = []
-        if prox_avail >= 3:
+        if prox_avail >= cfg.min_ref_points_per_side:
             ref_candidates.extend([v for v in d_s[left0:m] if v <= ref_cap])
-        if dist_avail >= 3:
+        if dist_avail >= cfg.min_ref_points_per_side:
             ref_candidates.extend([v for v in d_s[m + 1:right0 + 1] if v <= ref_cap])
 
-        if len(ref_candidates) >= 5:
-            local_ref = float(np.percentile(ref_candidates, 80))
-        elif len(ref_candidates) > 0:
-            local_ref = float(np.median(ref_candidates))
-        else:
-            # No adjacent reference at all → cannot establish a reliable baseline
+        if not ref_candidates:
+            # Neither side has an established-enough run of the branch's own
+            # caliber to trust as a reference — rather than fall back to a
+            # contaminated or arbitrary value, skip this lesion.
             continue
+
+        local_ref = (float(np.percentile(ref_candidates, 80)) if len(ref_candidates) >= 5
+                    else float(np.median(ref_candidates)))
 
         if local_ref <= 1e-6:
             continue
@@ -778,13 +808,6 @@ def detect_lesions_on_branch(branch: List[Tuple[int,int]], dt: np.ndarray,
             R += 1
 
         if (R - L + 1) < cfg.min_lesion_points:
-            continue
-
-        # Skip minima within 5 pts of branch endpoints — these are junction/endpoint
-        # pixels where the vessel geometry changes abruptly and measurements are
-        # unreliable (skeleton degree transitions, natural tapering at tips).
-        edge_margin = max(5, cfg.min_lesion_points)
-        if m < edge_margin or m > N - 1 - edge_margin:
             continue
 
         # DT-based diameter at this exact original-branch point (no smoothing).
@@ -1144,9 +1167,18 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
                         les: dict, cfg: QCAConfig, title: str,
                         heatmap: Optional[np.ndarray] = None) -> "plt.Figure":
     """
-    Builds the 3-panel explainable figure (cropped angiogram, width heatmap,
-    localized diameter profile) for a single lesion. Returns an open
+    Builds the explainable figure for a single lesion. Returns an open
     matplotlib Figure — caller is responsible for saving/embedding and closing it.
+
+    Top row -- whole-frame context, so the crops below can be placed within
+    the full vessel tree at a glance:
+      - Full Frame - Raw Angiogram: the untouched frame.
+      - Full Frame - Vessel Mask + Stenosis Location: the same frame with the
+        vessel mask outline, a circle at this lesion's location, and a
+        rectangle marking the crop region shown in the bottom row.
+    Bottom row -- zoomed-in detail, cropped tight around the lesion: raw
+    crop, the same crop annotated with centerline/diameter markers, width
+    heatmap, and the localized diameter profile.
 
     `heatmap` may be passed in precomputed (BGR colormap of the full-frame
     distance transform) to avoid recomputing it per lesion when called in a loop
@@ -1173,6 +1205,7 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
     x1, x2 = max(0, x0 - crop_size), min(W, x0 + crop_size)
 
     patch_angio = angio_bgr[y1:y2, x1:x2].copy()
+    patch_raw = patch_angio.copy()  # snapshot before the centerline/diameter overlay below
     patch_heat = heatmap[y1:y2, x1:x2].copy()
     patch_mask = mask[y1:y2, x1:x2]
 
@@ -1191,30 +1224,60 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
     d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
     d_s = smooth_1d(d_raw, cfg.smooth_win)
 
-    fig = plt.figure(figsize=(14, 5))
+    unit = "mm" if cfg.px_to_mm else "px"
+    scale = cfg.px_to_mm if cfg.px_to_mm else 1.0
+    d_raw_disp = d_raw * scale
+    d_s_disp = d_s * scale
+    rvd_disp = les.get("RVD_mm") if les.get("RVD_mm") is not None else les["RVD_px"] * scale
+    mld_disp = les.get("MLD_mm") if les.get("MLD_mm") is not None else les["MLD_px"] * scale
 
-    ax1 = plt.subplot(1, 3, 1)
+    severity_color = _SEVERITY_BGR.get(les["severity"], _SEVERITY_BGR["MILD"])
+    full_marked = angio_bgr.copy()
+    full_contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(full_marked, full_contours, -1, (0, 255, 0), 1)
+    cv2.circle(full_marked, (x0, y0), 16, severity_color, 2)
+    cv2.rectangle(full_marked, (x1, y1), (x2 - 1, y2 - 1), severity_color, 1)
+
+    fig = plt.figure(figsize=(18, 10))
+    gs = fig.add_gridspec(2, 4, height_ratios=[1.15, 1])
+
+    ax_full_raw = fig.add_subplot(gs[0, 0:2])
+    ax_full_raw.imshow(cv2.cvtColor(angio_bgr, cv2.COLOR_BGR2RGB))
+    ax_full_raw.set_title("Full Frame — Raw Angiogram")
+    ax_full_raw.axis('off')
+
+    ax_full_marked = fig.add_subplot(gs[0, 2:4])
+    ax_full_marked.imshow(cv2.cvtColor(full_marked, cv2.COLOR_BGR2RGB))
+    ax_full_marked.set_title("Full Frame — Vessel Mask + Stenosis Location")
+    ax_full_marked.axis('off')
+
+    ax0 = fig.add_subplot(gs[1, 0])
+    ax0.imshow(cv2.cvtColor(patch_raw, cv2.COLOR_BGR2RGB))
+    ax0.set_title("Raw Angiogram")
+    ax0.axis('off')
+
+    ax1 = fig.add_subplot(gs[1, 1])
     ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
-    ax1.set_title("Lesion Angiogram")
+    ax1.set_title("Lesion Angiogram (Centerline + Diameter)")
     ax1.axis('off')
 
-    ax2 = plt.subplot(1, 3, 2)
+    ax2 = fig.add_subplot(gs[1, 2])
     ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
     ax2.set_title("Width Heatmap (Red=Wide, Blue=Narrow)")
     ax2.axis('off')
 
-    ax3 = plt.subplot(1, 3, 3)
-    region_raw = d_raw[disp_L:disp_R+1]
-    region_smooth = d_s[disp_L:disp_R+1]
+    ax3 = fig.add_subplot(gs[1, 3])
+    region_raw = d_raw_disp[disp_L:disp_R+1]
+    region_smooth = d_s_disp[disp_L:disp_R+1]
     x_axis = range(disp_L, disp_R+1)
 
     ax3.plot(x_axis, region_raw, alpha=0.4, color='gray', label="Raw DT Width")
     ax3.plot(x_axis, region_smooth, color='blue', label="Smoothed Width")
     ax3.axvspan(L, R, alpha=0.2, color="red", label="Stenosis Region")
-    ax3.axhline(les["RVD_px"], color='green', linestyle='--', label=f"RVD: {les['RVD_px']:.1f}px")
-    ax3.plot(m_idx, les["MLD_px"], 'rv', markersize=8, label=f"MLD: {les['MLD_px']:.1f}px")
+    ax3.axhline(rvd_disp, color='green', linestyle='--', label=f"RVD: {rvd_disp:.2f}{unit}")
+    ax3.plot(m_idx, mld_disp, 'rv', markersize=8, label=f"MLD: {mld_disp:.2f}{unit}")
     ax3.set_title("Local Diameter Profile")
-    ax3.set_ylabel("Diameter (pixels)")
+    ax3.set_ylabel(f"Diameter ({unit})")
     ax3.legend(fontsize=9)
 
     occ_str = " [TOTAL OCCLUSION]" if les.get("total_occlusion") else ""

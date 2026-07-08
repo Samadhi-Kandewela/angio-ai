@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional
 
+import patient_db
+
 # angio-ai/src/clinical_app/patient_store.py -> parents[2] == angio-ai/
 DEFAULT_PATIENT_DATA_ROOT = Path(__file__).resolve().parents[2] / "patient_data"
 
@@ -128,7 +130,7 @@ def create_patient_case(metadata: dict, dicom_paths: List[str],
     metadata_path = case_dir / "metadata.json"
     metadata_path.write_text(json.dumps(full_metadata, indent=2), encoding="utf-8")
 
-    _append_case_index(root, full_metadata)
+    patient_db.upsert_case(full_metadata, root_dir=root)
 
     return PatientCase(
         case_id=case_dir.name, case_dir=case_dir, metadata_path=metadata_path,
@@ -136,36 +138,15 @@ def create_patient_case(metadata: dict, dicom_paths: List[str],
     )
 
 
-def _append_case_index(root: Path, metadata: dict) -> None:
-    """Maintains a flat case_index.json at the storage root for a future patient-list page."""
-    index_path = root / "case_index.json"
-    entries = []
-    if index_path.exists():
-        try:
-            entries = json.loads(index_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            entries = []
-
-    entries.append({
-        "case_id": metadata["case_id"],
-        "patient_id": metadata.get("patient_id", ""),
-        "full_name": metadata.get("full_name", ""),
-        "study_date": metadata.get("study_date", ""),
-        "created_at": metadata["created_at"],
-    })
-    index_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
-
-
-def list_cases(root_dir: Optional[Path] = None) -> list:
-    """Returns the flat case index (most recent last) for a future patient-list page."""
+def list_cases(root_dir: Optional[Path] = None, search: Optional[str] = None) -> list:
+    """
+    Returns cases (most recently created first) from the SQLite index
+    (patient_db.py). The index is just a fast, disposable cache over each
+    case's real metadata.json -- see patient_db.rebuild_from_disk() for how
+    it's kept in sync / self-healed.
+    """
     root = Path(root_dir) if root_dir else DEFAULT_PATIENT_DATA_ROOT
-    index_path = root / "case_index.json"
-    if not index_path.exists():
-        return []
-    try:
-        return json.loads(index_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
+    return patient_db.list_cases(root_dir=root, search=search)
 
 
 def get_case_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:
@@ -179,6 +160,24 @@ def get_case_dicom_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:
 
 def get_case_analysis_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:
     return get_case_dir(case_id, root_dir) / "analysis_results"
+
+
+def get_case_ecg_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:
+    return get_case_dir(case_id, root_dir) / "ecg_results"
+
+
+def delete_case(case_id: str, root_dir: Optional[Path] = None) -> None:
+    """
+    Permanently deletes a case: its whole folder on disk (metadata, DICOM
+    sources, analysis_results, ecg_results, generated reports) and its row in
+    the SQLite index. Irreversible -- callers should confirm with the user
+    first.
+    """
+    root = Path(root_dir) if root_dir else DEFAULT_PATIENT_DATA_ROOT
+    case_dir = get_case_dir(case_id, root)
+    if case_dir.exists():
+        shutil.rmtree(case_dir)
+    patient_db.delete_case(case_id, root_dir=root)
 
 
 def load_metadata(case_id: str, root_dir: Optional[Path] = None) -> dict:

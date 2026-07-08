@@ -1,4 +1,5 @@
 import os
+import argparse
 import cv2
 import json
 import numpy as np
@@ -169,6 +170,18 @@ def copy_test_dataset():
         shutil.copy(src_json, dst_json)
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Offline-augment a segmentation dataset (COCO-style train.json)')
+    parser.add_argument('--root-dir', type=str, default=ROOT_DIR, help='Root dir containing <dataset-type>/<split>/images + annotations')
+    parser.add_argument('--dataset-type', type=str, default=DATASET_TYPE, help='Dataset subfolder name, e.g. syntax or combined')
+    parser.add_argument('--output-dir', type=str, default=OUTPUT_DIR, help='Where to write the augmented dataset')
+    parser.add_argument('--aug-factor', type=int, default=AUG_FACTOR, help='Number of augmented copies to generate per source image')
+    args = parser.parse_args()
+
+    ROOT_DIR = args.root_dir
+    DATASET_TYPE = args.dataset_type
+    OUTPUT_DIR = args.output_dir
+    AUG_FACTOR = args.aug_factor
+
     create_output_dirs()
     augment_dataset('train')
     copy_test_dataset()

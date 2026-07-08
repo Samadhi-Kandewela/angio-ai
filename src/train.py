@@ -23,7 +23,7 @@ def dice_loss(pred, target, smooth=1.):
 def train_net(net, device, args, epochs=5, batch_size=1, lr=1e-4, val_percent=0.1, save_cp=True, img_scale=0.5, data_dir='dataset'):
     # 1. Create dataset
     try:
-        dataset = SegmentationDataset(data_dir, split='train')
+        dataset = SegmentationDataset(data_dir, dataset_type=args.dataset_type, split='train')
     except FileNotFoundError as e:
         logging.error(f"Dataset not found at {data_dir}. Please specify correct path with --data-dir.")
         raise e
@@ -90,7 +90,7 @@ def train_net(net, device, args, epochs=5, batch_size=1, lr=1e-4, val_percent=0.
         logging.info(f'Validation Dice: {val_score}')
 
         if save_cp:
-            checkpoint_dir = os.path.join('checkpoints', args.model)
+            checkpoint_dir = args.checkpoint_dir if args.checkpoint_dir else os.path.join('checkpoints', args.model)
             os.makedirs(checkpoint_dir, exist_ok=True)
             torch.save(net.state_dict(), os.path.join(checkpoint_dir, f'checkpoint_epoch{epoch + 1}.pth'))
             logging.info(f'Checkpoint {epoch + 1} saved to {checkpoint_dir}!')
@@ -137,7 +137,9 @@ def get_args():
     parser.add_argument('--classes', '-c', type=int, default=1, help='Number of classes')
     parser.add_argument('--model', '-m', type=str, default='unet', choices=['unet', 'dscunet', 'mobileunet', 'mobileunetv2', 'mobileunetv3', 'deeplabv3', 'deeplabv3_resnet'], help='Model architecture')
     parser.add_argument('--data-dir', type=str, default='dataset', help='Path to dataset root directory')
-    
+    parser.add_argument('--dataset-type', type=str, default='syntax', help='Dataset subfolder name under --data-dir, e.g. syntax or combined')
+    parser.add_argument('--checkpoint-dir', type=str, default=None, help='Override checkpoint save directory (default: checkpoints/<model>)')
+
     return parser.parse_args()
 
 if __name__ == '__main__':

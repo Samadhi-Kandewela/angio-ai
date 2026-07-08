@@ -235,3 +235,6 @@ plot_*.py
 !/checkpoints/**/*.pth
 patient_data/
 checkpoints/
+combined_dataset/
+combined_dataset_augmented/
+combined_dataset_prepared/

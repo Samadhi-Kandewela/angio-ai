@@ -184,9 +184,7 @@ class LocalDicomAnalysisPage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Select a patient case and DICOM series, load the AI models, then play or scrub through "
-            "the cine loop. Each frame is fully re-analyzed (segmentation + QCA), so playback is "
-            "paced by analysis time, not the original frame rate."
+            "Choose a case and series, then review the angiogram with AI analysis."
         )
         subtitle.setProperty("role", "pageSubtitle")
         subtitle.setWordWrap(True)
@@ -397,13 +395,7 @@ class LocalDicomAnalysisPage(QWidget):
         self.txt_view_label.setPlaceholderText("Example: RAO 30 / CRA 20")
         label_row.addWidget(self.txt_view_label, stretch=1)
         v.addLayout(label_row)
-        hint = QLabel(
-            "Analyzing the full series aggregates stenosis detections across every frame into one "
-            "authoritative reading per lesion (not a single noisy frame) and saves the result into "
-            "this case's analysis_results/ folder, alongside a per-view explainable report. Each view "
-            "is automatically named from its series description and file (e.g. \"Left Coronary 15 fps "
-            "— 000005\"), so no manual labeling is needed."
-        )
+        hint = QLabel("Save the current series as a view report for this patient case.")
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -489,14 +481,7 @@ class LocalDicomAnalysisPage(QWidget):
         header.setProperty("role", "sectionHeader")
         v.addWidget(header)
 
-        hint = QLabel(
-            "Analyzed automatically once playback reaches the end of the series -- the smallest set "
-            f"of frames (up to {KEY_FRAME_MAX_COUNT}) that shows every moderate-or-higher stenosis at least "
-            "once, picked by vessel opacification quality, so every finding has real supporting "
-            "evidence. Each picture shows only the original frame with a circle + short id (e.g. "
-            "\"L1\") around its own stenosis -- no vessel mask or skeleton -- since these are this "
-            "exact frame's own detections, always accurately placed."
-        )
+        hint = QLabel(f"Shows up to {KEY_FRAME_MAX_COUNT} clear frames that support the detected findings.")
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -1113,8 +1098,7 @@ class LocalDicomAnalysisPage(QWidget):
         if views:
             self.list_saved_views.setCurrentRow(0)
         if views:
-            names = ", ".join(v["view_label"] for v in views)
-            self.lbl_final_status.setText(f"{len(views)} view(s) saved for this case: {names}")
+            self.lbl_final_status.setText("")
         else:
             self.lbl_final_status.setText("No views saved yet for this case.")
 

@@ -1,5 +1,8 @@
 """Main window shell: a left navigation rail plus a stacked content area."""
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QStackedWidget, QFrame, QMessageBox, QApplication
@@ -12,6 +15,11 @@ from three_d_viewer_page import ThreeDViewerPage
 from ecg_analysis_page import EcgAnalysisPage
 from live_stream_page import LiveStreamPage
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOGO_DIR = PROJECT_ROOT / "logo"
+LOGO_PNG = LOGO_DIR / "logo.png"
+LOGO_ICO = LOGO_DIR / "logo.ico"
 
 NAV_ITEMS = [
     ("New Patient", True),
@@ -33,7 +41,9 @@ NAV_3D_VIEWER = 5
 class AppWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Angio-AI Clinical Dashboard")
+        self.setWindowTitle("Cardexa Clinical Dashboard")
+        if LOGO_ICO.exists():
+            self.setWindowIcon(QIcon(str(LOGO_ICO)))
         self.resize(1440, 900)
         self.setMinimumSize(1180, 720)
 
@@ -90,15 +100,30 @@ class AppWindow(QMainWindow):
         layout.setContentsMargins(20, 24, 20, 20)
         layout.setSpacing(2)
 
-        brand = QLabel("ANGIO-AI")
-        brand.setObjectName("brand")
-        layout.addWidget(brand)
+        brand_block = QFrame()
+        brand_block.setObjectName("brandBlock")
+        brand_layout = QVBoxLayout(brand_block)
+        brand_layout.setContentsMargins(4, 4, 4, 4)
+        brand_layout.setSpacing(0)
 
-        subtitle = QLabel("Clinical Dashboard")
-        subtitle.setObjectName("brandSubtitle")
-        layout.addWidget(subtitle)
+        if LOGO_PNG.exists():
+            brand_logo = QLabel()
+            brand_logo.setObjectName("brandLogo")
+            brand_logo.setAlignment(Qt.AlignCenter)
+            brand_logo.setFixedHeight(72)
+            brand_logo.setPixmap(
+                QPixmap(str(LOGO_PNG)).scaledToWidth(180, Qt.SmoothTransformation)
+            )
+            brand_layout.addWidget(brand_logo)
+        else:
+            brand = QLabel("Cardexa")
+            brand.setObjectName("brand")
+            brand.setAlignment(Qt.AlignCenter)
+            brand_layout.addWidget(brand)
 
-        layout.addSpacing(28)
+        layout.addWidget(brand_block)
+
+        layout.addSpacing(30)
 
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("navList")
@@ -111,10 +136,6 @@ class AppWindow(QMainWindow):
         self.nav_list.setCurrentRow(0)
         layout.addWidget(self.nav_list)
         layout.addStretch()
-
-        version = QLabel("v0.5 — patient intake + records + DICOM/ECG/live stream analysis")
-        version.setObjectName("versionLabel")
-        layout.addWidget(version)
 
         return sidebar
 

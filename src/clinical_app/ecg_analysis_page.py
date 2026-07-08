@@ -119,10 +119,7 @@ class EcgAnalysisPage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Select a patient case and load a 12-lead ECG image. The pipeline digitizes each "
-            "lead, runs a territory-based clinical diagnosis (ST elevation/depression grouped by "
-            "anatomical territory), and classifies against PTB-XL superclasses. Once this case "
-            "also has a saved angiogram view, you can cross-reference the two."
+            "Choose a patient case, load an ECG image, and save the analysis."
         )
         subtitle.setProperty("role", "pageSubtitle")
         subtitle.setWordWrap(True)
@@ -237,12 +234,7 @@ class EcgAnalysisPage(QWidget):
         header.setProperty("role", "sectionHeader")
         v.addWidget(header)
 
-        hint = QLabel(
-            "Runs the full pipeline (segmentation, digitization, territory-based diagnosis, ML "
-            "classification) and saves the result into this case's ecg_results/ folder, alongside "
-            "a plain-text diagnosis report and a visual result card. Automated screen only — "
-            "clinical correlation and expert review are required before any clinical decision."
-        )
+        hint = QLabel("Analyze the ECG and save the result with this patient case.")
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -294,12 +286,7 @@ class EcgAnalysisPage(QWidget):
         header.setProperty("role", "sectionHeader")
         v.addWidget(header)
 
-        hint = QLabel(
-            "Cross-references this ECG's territory-based findings against every QCA angiogram "
-            "view saved for this case, using each lesion's anatomical artery. This is "
-            "corroborating evidence for culprit-vessel review, not a functional-significance "
-            "score — FFR/iFR remain the gold standard for that."
-        )
+        hint = QLabel("Compare the ECG result with saved angiogram findings for this case.")
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         v.addWidget(hint)

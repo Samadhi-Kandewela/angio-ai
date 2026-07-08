@@ -77,8 +77,7 @@ class PatientRecordsPage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Search and browse every patient case on file. Select a row to see its full "
-            "record, open its folder, or jump straight to DICOM analysis."
+            "Find a patient case, review its details, or open it for analysis."
         )
         subtitle.setProperty("role", "pageSubtitle")
         subtitle.setWordWrap(True)

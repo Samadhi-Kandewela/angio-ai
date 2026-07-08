@@ -79,7 +79,7 @@ class ThreeDViewerPage(QWidget):
         title.setProperty("role", "pageTitle")
         title_col.addWidget(title)
 
-        self.lbl_status = QLabel("Select a case with a completed 3D reconstruction.")
+        self.lbl_status = QLabel("Open a completed 3D reconstruction.")
         self.lbl_status.setProperty("role", "pageSubtitle")
         self.lbl_status.setWordWrap(True)
         title_col.addWidget(self.lbl_status)
@@ -127,10 +127,7 @@ class ThreeDViewerPage(QWidget):
         lesions_header.setProperty("role", "sectionHeader")
         side_layout.addWidget(lesions_header)
 
-        lesions_caption = QLabel(
-            "Moderate/severe stenoses from the clinical report. "
-            "● shown on the 3D model — ○ not in this reconstruction."
-        )
+        lesions_caption = QLabel("Review stenosis findings linked to this 3D model.")
         lesions_caption.setProperty("role", "captionText")
         lesions_caption.setWordWrap(True)
         side_layout.addWidget(lesions_caption)
@@ -237,7 +234,7 @@ class ThreeDViewerPage(QWidget):
         header.setProperty("role", "sectionHeader")
         top.addWidget(header)
 
-        caption = QLabel("Open an existing 3D reconstruction, or create one from a DICOM case.")
+        caption = QLabel("Open a saved 3D model or create a new one from DICOM.")
         caption.setProperty("role", "captionText")
         caption.setWordWrap(True)
         top.addWidget(caption)
@@ -276,7 +273,7 @@ class ThreeDViewerPage(QWidget):
         layout.addWidget(self.list_case_select)
 
         self.lbl_case_select_empty = QLabel(
-            "No completed reconstructions yet. Use Create 3D Reconstruction to start from DICOM Analysis."
+            "No completed 3D models yet. Create one from DICOM Analysis."
         )
         self.lbl_case_select_empty.setProperty("role", "captionText")
         self.lbl_case_select_empty.setWordWrap(True)
@@ -309,7 +306,7 @@ class ThreeDViewerPage(QWidget):
     def _show_case_select(self):
         self.content_stack.setCurrentIndex(0)
         self.btn_change_case.setVisible(False)
-        self.lbl_status.setText("Select a case with a completed 3D reconstruction.")
+        self.lbl_status.setText("Open a completed 3D reconstruction.")
         self._refresh_case_select_list()
 
     def _on_view_3d_from_list(self):

@@ -116,8 +116,7 @@ class PatientIntakePage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Enter patient and study details, attach the DICOM angiogram, then create the case. "
-            "A dedicated folder is created for this patient's metadata, DICOM file(s), and analysis results."
+            "Add the patient details, attach the angiogram files, and create a new case."
         )
         subtitle.setProperty("role", "pageSubtitle")
         subtitle.setWordWrap(True)
@@ -294,9 +293,7 @@ class PatientIntakePage(QWidget):
         v.addWidget(header)
 
         hint = QLabel(
-            "Attach this study's DICOM data: individual .dcm file(s), or an entire exported study "
-            "folder (e.g. a cath-lab CD/DVD export with a DICOMDIR index and a Dicom/ subfolder of "
-            "frames) -- folders are copied whole, preserving their structure."
+            "Add DICOM files or a full study folder. The app will keep the files with this case."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)

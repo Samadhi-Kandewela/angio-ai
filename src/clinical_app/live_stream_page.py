@@ -147,7 +147,10 @@ class LiveStreamPage(QWidget):
         title.setProperty("role", "pageTitle")
         layout.addWidget(title)
 
-
+        subtitle = QLabel("Connect a stream and monitor angiogram analysis in real time.")
+        subtitle.setProperty("role", "pageSubtitle")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
 
         layout.addWidget(self._build_case_card())
         layout.addWidget(self._build_connection_card())
@@ -218,8 +221,7 @@ class LiveStreamPage(QWidget):
         v.addLayout(btn_row)
 
         hint = QLabel(
-            "Start the simulator first:  python src/scripts/simulate_stream.py "
-            "--video path/to/angiogram.mp4 --port 8080"
+            "Enter the stream URL, then connect to start live analysis."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -385,11 +387,7 @@ class LiveStreamPage(QWidget):
         v.addWidget(header)
 
         hint = QLabel(
-            f"Saving aggregates stenosis detections across the most recently captured frames "
-            f"(up to {CAPTURE_MAXLEN}) of the live stream into one authoritative reading per "
-            "lesion -- the same whole-run QCA analysis used for a saved DICOM cine loop -- and "
-            "saves the result into this case's analysis_results/ folder, alongside a per-view "
-            "explainable report."
+            "Save the recent stream analysis as a report for this patient case."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -696,8 +694,7 @@ class LiveStreamPage(QWidget):
         self.btn_final_report.setEnabled(len(views) > 0)
         self.btn_open_final_report.setVisible(False)
         if views:
-            names = ", ".join(v["view_label"] for v in views)
-            self.lbl_final_status.setText(f"{len(views)} view(s) saved for this case: {names}")
+            self.lbl_final_status.setText("")
         else:
             self.lbl_final_status.setText("No views saved yet for this case.")
 

@@ -50,15 +50,23 @@ def build_stylesheet() -> str:
         background-color: {SURFACE};
         border-right: 1px solid {BORDER};
     }}
+    QFrame#brandBlock {{
+        background-color: transparent;
+        border: none;
+    }}
     QLabel#brand {{
         color: {ACCENT};
-        font-size: 20px;
-        font-weight: 700;
-        letter-spacing: 1px;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: 0px;
+    }}
+    QLabel#brandLogo {{
+        background-color: transparent;
+        border: none;
     }}
     QLabel#brandSubtitle {{
         color: {ASH};
-        font-size: 11px;
+        font-size: 11.5px;
     }}
     QLabel#versionLabel {{
         color: {ASH_DIM};

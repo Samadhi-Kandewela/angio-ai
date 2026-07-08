@@ -62,6 +62,9 @@ DEFAULT_SEGMENTATION_MODEL_PATHS = [
     os.path.join(PROJECT_ROOT, "checkpoints", "mobileunetv3", "mobileunetv3_augmented_best.pth"),
 ]
 DEFAULT_LOCALIZATION_MODEL_PATHS = [
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.onnx"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "best.pth"),
+    os.path.join(PROJECT_ROOT, "checkpoints", "mask_localization_v2", "latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.onnx"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_latest.pth"),
     os.path.join(PROJECT_ROOT, "checkpoints", "multitask_localization_v2", "multitask_best.onnx"),
@@ -548,7 +551,14 @@ class VideoThread(QThread):
             ) and (
                 self._loc_class_map is None or self._frame_index % self._loc_frame_interval == 0
             ):
-                self._run_localization(img_rgb_enhanced)
+                try:
+                    self._loc_class_map, self._loc_confidence_map = run_localization_frame(
+                        self._loc_model, img_rgb_enhanced, mask_binary
+                    )
+                except Exception as e:
+                    self.error.emit(f"Localization inference error: {e}")
+                    self._loc_class_map = None
+                    self._loc_confidence_map = None
 
             t_end = time.perf_counter()
             latency_ms = (t_end - t_start) * 1000.0

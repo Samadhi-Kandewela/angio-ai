@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import List, Optional
 
 import cv2
+import matplotlib.pyplot as plt
 
 import pdf_report
-from qca import QCAConfig
-from report_engine import AngleResult, generate_reasoning
+from qca import QCAConfig, build_lesion_figure
+from report_engine import AngleResult, draw_angle_summary_bgr, draw_frame_stenosis_only, generate_reasoning
 
 
 def _sanitize(name: str) -> str:
@@ -40,6 +41,27 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
                                so the final combined report can embed it later
                                without needing the original frames/masks kept
                                around.
+      - key_frame_N.png     -- the smallest set of frames that shows every
+                               significant stenosis at least once (see
+                               select_key_frames), each as a plain frame with
+                               a circle + short id per lesion -- no vessel
+                               mask/skeleton, since these are that exact
+                               frame's own detections and always accurately
+                               placed -- so the analyst can see the
+                               strongest evidence for each detection without
+                               re-running analysis.
+      - key_frame_N_raw.png -- the same frame with no annotation at all, so
+                               the final report can show the untouched
+                               angiogram next to the AI-labeled one for
+                               direct visual comparison.
+      - lesion_<id>_detail.png -- the 4-panel explainable figure (raw crop,
+                               centerline+diameter crop, width heatmap, local
+                               diameter profile in mm) for each lesion track's
+                               representative (highest-score/confidence)
+                               detection -- saved now, while the source frame/
+                               mask/distance-transform are still in memory, so
+                               the final cross-view report can embed it later
+                               without re-running analysis.
       - view_report.pdf     -- the per-view explainable report (crops,
                                heatmaps, diameter profiles, reasoning text),
                                via the existing multi-view PDF renderer
@@ -57,7 +79,7 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
     if angle_result.tracks and angle_result.summary_frame_idx is not None:
         rec = angle_result.get_frame_record(angle_result.summary_frame_idx)
         if rec is not None:
-            vis_bgr = pdf_report._draw_angle_summary_bgr(rec, angle_result.tracks)
+            vis_bgr = draw_angle_summary_bgr(rec, angle_result.tracks)
             image_name = "summary_overlay.png"
             cv2.imwrite(str(view_dir / image_name), vis_bgr)
 
@@ -67,9 +89,34 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
                 if t is not None:
                     co_visible_ids.add(t.track_id)
 
+    key_frame_images = []
+    for idx in angle_result.key_frame_indices:
+        rec = angle_result.get_frame_record(idx)
+        if rec is None:
+            continue
+        vis_bgr = draw_frame_stenosis_only(rec, angle_result.tracks)
+        name = f"key_frame_{idx}.png"
+        cv2.imwrite(str(view_dir / name), vis_bgr)
+
+        raw_bgr = cv2.cvtColor(rec.img_rgb, cv2.COLOR_RGB2BGR)
+        raw_name = f"key_frame_{idx}_raw.png"
+        cv2.imwrite(str(view_dir / raw_name), raw_bgr)
+
+        key_frame_images.append({"frame_idx": idx, "image": name, "raw_image": raw_name})
+
     lesions_json = []
     for t in angle_result.tracks:
         rep = t.representative
+        detail_image = None
+        rec = angle_result.get_frame_record(rep["frame_idx"])
+        if rec is not None:
+            title = f"{t.track_id} — {angle_result.angle_label} — {t.label}"
+            fig = build_lesion_figure(rec.img_gray, rec.bw_mask, rec.dt, rep, cfg, title)
+            detail_name = f"lesion_{_sanitize(t.track_id)}_detail.png"
+            fig.savefig(view_dir / detail_name, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            detail_image = detail_name
+
         lesions_json.append({
             "track_id": t.track_id,
             "label": t.label,
@@ -85,6 +132,7 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
             "total_occlusion": bool(rep.get("total_occlusion")),
             "co_visible_in_summary_frame": t.track_id in co_visible_ids,
             "reasoning": generate_reasoning(t, cfg),
+            "detail_image": detail_image,
         })
 
     summary = {
@@ -95,6 +143,7 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
         "n_frames_analyzed": angle_result.n_frames_analyzed,
         "has_localization": angle_result.has_localization,
         "summary_image": image_name,
+        "key_frame_images": key_frame_images,
         "lesions": lesions_json,
     }
     (view_dir / "results.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

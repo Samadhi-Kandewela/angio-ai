@@ -31,13 +31,6 @@ from skimage.morphology import skeletonize
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = ROOT / "checkpoints" / "mobileunetv3" / "mobileunetv3_augmented_best.onnx"
-DEFAULT_LOCALIZATION_MODEL = ROOT / "checkpoints" / "multitask_localization_v2" / "multitask_latest.onnx"
-
-SRC_DIR = ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from qca import QCAConfig, detect_lesions_on_branch  # noqa: E402
 
 
 @dataclass
@@ -232,116 +225,6 @@ def extract_graph(mask: np.ndarray):
     return clean, skel, dt, branches
 
 
-def write_branch_geometry(path: Path, branches: list[dict]):
-    payload = []
-    for branch in branches:
-        coords = np.asarray(branch["centerline_yx"], dtype=np.float64)
-        if len(coords) == 0:
-            continue
-        payload.append(
-            {
-                "branch_id": int(branch["branch_id"]),
-                "points": int(branch["points"]),
-                "length_px": float(branch["length_px"]),
-                "mean_diameter_px": float(branch["mean_diameter_px"]),
-                "start_yx": [float(v) for v in coords[0]],
-                "end_yx": [float(v) for v in coords[-1]],
-                "mean_yx": [float(v) for v in np.mean(coords, axis=0)],
-                "min_yx": [float(v) for v in np.min(coords, axis=0)],
-                "max_yx": [float(v) for v in np.max(coords, axis=0)],
-            }
-        )
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"branches": payload}, f, indent=2)
-
-
-def write_vessel_graph(path: Path, skeleton: np.ndarray, branches: list[dict]):
-    adj = adjacency(skeleton)
-    node_lookup = {}
-    nodes = []
-    for point, neighbors in adj.items():
-        degree = len(neighbors)
-        if degree != 2:
-            node_id = len(nodes)
-            node_lookup[point] = node_id
-            kind = "endpoint" if degree <= 1 else "bifurcation"
-            nodes.append(
-                {
-                    "node_id": node_id,
-                    "kind": kind,
-                    "yx": [int(point[0]), int(point[1])],
-                    "degree": int(degree),
-                }
-            )
-
-    def nearest_node_id(point):
-        if point in node_lookup:
-            return node_lookup[point]
-        if not nodes:
-            return None
-        py, px = point
-        distances = [
-            (node["yx"][0] - py) ** 2 + (node["yx"][1] - px) ** 2
-            for node in nodes
-        ]
-        return int(np.argmin(distances))
-
-    root_node = None
-    bifurcations = [node for node in nodes if node["kind"] == "bifurcation"]
-    if bifurcations:
-        root_node = min(bifurcations, key=lambda node: (node["yx"][1], node["yx"][0]))["node_id"]
-    elif nodes:
-        root_node = min(nodes, key=lambda node: (node["yx"][1], node["yx"][0]))["node_id"]
-
-    graph_branches = []
-    for branch in branches:
-        branch_path = [tuple(point) for point in branch["centerline_yx"]]
-        start_node = nearest_node_id(branch_path[0]) if branch_path else None
-        end_node = nearest_node_id(branch_path[-1]) if branch_path else None
-        connected_bifurcation = None
-        for node_id in (start_node, end_node):
-            if node_id is not None and nodes[node_id]["kind"] == "bifurcation":
-                connected_bifurcation = node_id
-                break
-        graph_branches.append(
-            {
-                "branch_id": int(branch["branch_id"]),
-                "start_node": start_node,
-                "end_node": end_node,
-                "connected_bifurcation": connected_bifurcation,
-                "parent_branch_id": None,
-                "child_branch_ids": [],
-                "generation_level": 0 if connected_bifurcation == root_node else None,
-                "points": int(branch["points"]),
-                "length_px": float(branch["length_px"]),
-                "mean_diameter_px": float(branch["mean_diameter_px"]),
-            }
-        )
-
-    by_node = {}
-    for branch in graph_branches:
-        for node_id in (branch["start_node"], branch["end_node"]):
-            if node_id is not None:
-                by_node.setdefault(node_id, []).append(branch["branch_id"])
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "root_node": root_node,
-                "nodes": nodes,
-                "branches": graph_branches,
-                "node_to_branch_ids": {str(k): v for k, v in by_node.items()},
-                "meaning": {
-                    "endpoint": "skeleton node with one or zero neighbors",
-                    "bifurcation": "skeleton node with three or more neighbors",
-                    "generation_level": "initial placeholder for anatomy-aware matching; refined by landmark detection",
-                },
-            },
-            f,
-            indent=2,
-        )
-
-
 def rotation_from_angles(primary_deg, secondary_deg):
     primary = math.radians(primary_deg)
     secondary = math.radians(secondary_deg)
@@ -489,12 +372,8 @@ def make_frame(tangent):
     return normal, binormal
 
 
-def variable_tube(points, radii, segments=16, protect_mask=None):
-    radii = np.asarray(radii, dtype=np.float64)
-    smoothed = smooth_1d(radii, 9)
-    if protect_mask is not None:
-        smoothed = np.where(protect_mask, radii, smoothed)
-    radii = smoothed
+def variable_tube(points, radii, segments=16):
+    radii = smooth_1d(np.asarray(radii), 9)
     vertices, faces = [], []
     if len(points) < 2:
         return vertices, faces
@@ -516,7 +395,6 @@ def write_obj(path, parts):
     with open(path.with_suffix(".mtl"), "w", encoding="utf-8") as f:
         f.write("newmtl reliable\nKd 0.78 0.78 0.78\n")
         f.write("newmtl usable\nKd 0.45 0.65 1.0\n")
-        f.write("newmtl uncertain\nKd 1.0 0.86 0.15\n")
         f.write("newmtl single_view_preserved\nKd 1.0 0.58 0.12\n")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"mtllib {path.with_suffix('.mtl').name}\n")
@@ -529,91 +407,6 @@ def write_obj(path, parts):
             for a, b, c in faces:
                 f.write(f"f {a + offset} {b + offset} {c + offset}\n")
             offset += len(vertices)
-
-
-def attach_qca_lesions(branches: list[dict], dt: np.ndarray, mask: np.ndarray, gray: np.ndarray, cfg: QCAConfig):
-    """Runs QCA lesion detection directly on each branch's own centerline and
-    distance transform -- the same ones the mesh is built from -- so a
-    detected lesion is already tied to the exact branch/point that produced
-    it, with no later matching step needed."""
-    for branch in branches:
-        branch["qca_lesions"] = detect_lesions_on_branch(
-            branch["centerline_yx"], dt, cfg, mask=mask, angio_gray=gray
-        )
-
-
-def _arclength_fractions(points_yx) -> np.ndarray:
-    pts = np.asarray(points_yx, dtype=np.float64)
-    if len(pts) <= 1:
-        return np.zeros(len(pts))
-    dist = np.zeros(len(pts))
-    dist[1:] = np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))
-    total = dist[-1] if dist[-1] > 0 else 1.0
-    return dist / total
-
-
-def _lesion_taper(n: int, idx_l: int, idx_m: int, idx_r: int, ratio: float) -> np.ndarray:
-    """Smoothstep taper: 1.0 outside [idx_l, idx_r], easing down to `ratio`
-    at idx_m and back up, so the lesion reads as a real narrowing rather than
-    a step change."""
-    profile = np.ones(n, dtype=np.float64)
-    if idx_m > idx_l:
-        t = np.linspace(0.0, 1.0, idx_m - idx_l + 1)
-        ease = t * t * (3.0 - 2.0 * t)
-        profile[idx_l:idx_m + 1] = 1.0 - (1.0 - ratio) * ease
-    else:
-        profile[idx_l] = ratio
-    if idx_r > idx_m:
-        t = np.linspace(1.0, 0.0, idx_r - idx_m + 1)
-        ease = t * t * (3.0 - 2.0 * t)
-        profile[idx_m:idx_r + 1] = 1.0 - (1.0 - ratio) * ease
-    else:
-        profile[idx_m] = min(profile[idx_m], ratio)
-    return profile
-
-
-def apply_qca_narrowing(branch: dict, coords: np.ndarray, radii: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, list[dict]]:
-    """Blends QCA-measured lesion narrowing into the DT-based radius profile,
-    at the correct arc-length position along `coords`. Returns the updated
-    radii, a boolean mask of indices to protect from later smoothing, and the
-    lesion rows (with mesh-space info) for reporting."""
-    qca_lesions = branch.get("qca_lesions") or []
-    if not qca_lesions:
-        return radii, None, []
-
-    fractions = _arclength_fractions(branch["centerline_yx"])
-    n = len(coords)
-    protect_mask = np.zeros(n, dtype=bool)
-    lesion_rows = []
-    for lesion in qca_lesions:
-        ratio = float(np.clip(lesion["MLD_px"] / max(lesion["RVD_px"], 1e-6), 0.02, 1.0))
-        idx_l = int(round(fractions[lesion["L_idx"]] * (n - 1)))
-        idx_m = int(round(fractions[lesion["min_idx"]] * (n - 1)))
-        idx_r = int(round(fractions[lesion["R_idx"]] * (n - 1)))
-        idx_l, idx_r = min(idx_l, idx_m), max(idx_r, idx_m)
-
-        radii = radii * _lesion_taper(n, idx_l, idx_m, idx_r, ratio)
-        protect_mask[idx_l:idx_r + 1] = True
-        lesion_rows.append(
-            {
-                "branch_id": branch["branch_id"],
-                "mesh_point_index": idx_m,
-                # Arc-length fractions (0=branch start, 1=branch end) so a
-                # downstream stage that resamples this branch to a different
-                # point count can still locate the same lesion span.
-                "l_fraction": float(fractions[lesion["L_idx"]]),
-                "m_fraction": float(fractions[lesion["min_idx"]]),
-                "r_fraction": float(fractions[lesion["R_idx"]]),
-                "radius_ratio": ratio,
-                "DS_percent": lesion["DS_percent"],
-                "severity": lesion["severity"],
-                "MLD_px": lesion["MLD_px"],
-                "RVD_px": lesion["RVD_px"],
-                "confidence": lesion.get("confidence"),
-                "total_occlusion": bool(lesion.get("total_occlusion")),
-            }
-        )
-    return radii, protect_mask, lesion_rows
 
 
 def build_mesh(matches, dt_a, out_dir: Path, mag_factor: float):
@@ -630,7 +423,7 @@ def build_mesh(matches, dt_a, out_dir: Path, mag_factor: float):
     z_low = float(np.percentile(anchor_z, 5) - 8.0)
     z_high = float(np.percentile(anchor_z, 95) + 8.0)
 
-    parts, report, lesions_3d = [], [], []
+    parts, report = [], []
     for match in matches:
         branch = match["branch_a"]
         status = match["status"]
@@ -639,27 +432,20 @@ def build_mesh(matches, dt_a, out_dir: Path, mag_factor: float):
         # visual continuity. Stereo-supported branches inform depth and quality;
         # weak branches are kept but depth-clamped rather than discarded.
         coords = resample_polyline(branch["centerline_yx"], min(64, max(20, branch["points"])))
-        points = depth_model(coords)
-        z = points[:, 2]
+        xy = yx_to_xy(coords)
+        z = depth_model(coords)[:, 2]
         if status == "single_view_preserved":
             z = np.clip(z, z_low, z_high)
         else:
             z = np.clip(z, z_low - 6.0, z_high + 6.0)
-        points[:, 2] = z
+        points = np.column_stack([xy, z])
 
         y = np.clip(np.rint(coords[:, 0]).astype(int), 0, 511)
         x = np.clip(np.rint(coords[:, 1]).astype(int), 0, 511)
         radii = np.clip(smooth_1d(dt_a[y, x] * object_px_mm, 9), 0.16, 2.2)
         if status == "single_view_preserved":
             radii *= 0.85
-
-        radii, protect_mask, lesion_rows = apply_qca_narrowing(branch, coords, radii)
-        radii = np.clip(radii, 0.08, 2.2)
-        for row in lesion_rows:
-            row["position_3d"] = [float(v) for v in points[row["mesh_point_index"]]]
-            lesions_3d.append(row)
-
-        vertices, faces = variable_tube(points, radii, protect_mask=protect_mask)
+        vertices, faces = variable_tube(points, radii)
         parts.append((f"branch_{branch['branch_id']:02d}_{status}", status, vertices, faces))
         min_r = float(np.min(radii))
         ref_r = float(np.percentile(radii, 80))
@@ -673,8 +459,6 @@ def build_mesh(matches, dt_a, out_dir: Path, mag_factor: float):
                 "min_radius_mm": min_r,
                 "ref_radius_mm_p80": ref_r,
                 "estimated_diameter_stenosis_pct": max(0.0, (1.0 - min_r / max(ref_r, 1e-6)) * 100.0),
-                "qca_lesion_count": len(lesion_rows),
-                "qca_worst_ds_percent": max((row["DS_percent"] for row in lesion_rows), default=0.0),
             }
         )
     write_obj(out_dir / "pipeline_hybrid_qca_tree.obj", parts)
@@ -682,8 +466,6 @@ def build_mesh(matches, dt_a, out_dir: Path, mag_factor: float):
         writer = csv.DictWriter(f, fieldnames=list(report[0].keys()))
         writer.writeheader()
         writer.writerows(report)
-    with open(out_dir / "pipeline_qca_lesions_3d.json", "w", encoding="utf-8") as f:
-        json.dump({"lesions": lesions_3d}, f, indent=2)
     return report
 
 
@@ -725,11 +507,6 @@ def main():
 
     clean_a, skel_a, dt_a, branches_a = extract_graph(mask_a)
     clean_b, skel_b, dt_b, branches_b = extract_graph(mask_b)
-    attach_qca_lesions(branches_a, dt_a, clean_a, gray_a, QCAConfig())
-    write_branch_geometry(out / "view_a_branches.json", branches_a)
-    write_branch_geometry(out / "view_b_branches.json", branches_b)
-    write_vessel_graph(out / "view_a_vessel_graph.json", skel_a, branches_a)
-    write_vessel_graph(out / "view_b_vessel_graph.json", skel_b, branches_b)
     cv2.imwrite(str(out / "view_a_clean_mask.png"), clean_a)
     cv2.imwrite(str(out / "view_b_clean_mask.png"), clean_b)
     cv2.imwrite(str(out / "view_a_skeleton.png"), skel_a)

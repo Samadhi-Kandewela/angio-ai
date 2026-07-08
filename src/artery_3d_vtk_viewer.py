@@ -38,7 +38,6 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -71,52 +70,9 @@ DEFAULT_OBJ = PROJECT_ROOT / "dicom_pipeline_output_v2" / "pipeline_hybrid_qca_t
 MATERIAL_COLORS = {
     "reliable": (0.78, 0.78, 0.78),
     "usable": (0.25, 0.48, 1.0),
-    "uncertain": (1.0, 0.86, 0.15),
-    "estimated": (0.82, 0.82, 0.82),
-    "estimated_connector": (0.68, 0.70, 0.72),
     "single_view_preserved": (1.0, 0.55, 0.08),
     "stenosis_marker": (1.0, 0.02, 0.02),
 }
-
-
-def metadata_search_dirs(obj_path: Path) -> List[Path]:
-    """Folders that may contain reports/images for an OBJ.
-
-    The original pipeline writes OBJ, reports, and validation images into one
-    folder. The reviewed DICOM packages place the OBJ under mesh/ and keep
-    reports/images in sibling folders, so the viewer needs to search both.
-    """
-    folder = obj_path.parent
-    case_root = folder.parent if folder.name.lower() == "mesh" else folder
-    candidates = [
-        folder,
-        case_root,
-        case_root / "reports",
-        case_root / "reprojection_validation",
-        case_root / "branch_mapping",
-        case_root / "selected_views",
-        case_root / "02_pipeline",
-        case_root / "05_final_validation",
-        case_root / "04_smoothed_confidence",
-    ]
-    seen = set()
-    paths: List[Path] = []
-    for path in candidates:
-        resolved = str(path.resolve()) if path.exists() else str(path)
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        paths.append(path)
-    return paths
-
-
-def find_metadata_file(obj_path: Path, names: List[str]) -> Optional[Path]:
-    for folder in metadata_search_dirs(obj_path):
-        for name in names:
-            path = folder / name
-            if path.exists():
-                return path
-    return None
 
 
 @dataclass
@@ -169,44 +125,23 @@ def parse_obj(path: Path) -> ObjMesh:
 
 
 def load_branch_report(obj_path: Path) -> Dict[int, Dict[str, str]]:
-    csv_path = find_metadata_file(
-        obj_path,
-        [
-            "pipeline_branch_quality_radius.csv",
-            "hybrid_qca_radius_report.csv",
-            "branch_quality_report.csv",
-            "qca_branch_radius_stenosis.csv",
-        ],
-    )
-    if csv_path:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-        report = {}
-        for row in rows:
-            try:
-                report[int(row["branch_id"])] = row
-            except Exception:
-                continue
-        return report
-    return {}
-
-
-def load_bad_reprojection_branch_ids(obj_path: Path) -> set[int]:
-    bad_ids: set[int] = set()
-    for name in ("final_reprojection_validation_report.csv", "reprojection_validation_report.csv"):
-        csv_path = find_metadata_file(obj_path, [name])
-        if not csv_path:
-            continue
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
+    candidates = [
+        obj_path.with_name("pipeline_branch_quality_radius.csv"),
+        obj_path.with_name("hybrid_qca_radius_report.csv"),
+        obj_path.with_name("branch_quality_report.csv"),
+    ]
+    for csv_path in candidates:
+        if csv_path.exists():
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            report = {}
+            for row in rows:
                 try:
-                    if str(row.get("validation_status", "")).lower() == "bad":
-                        bad_ids.add(int(row["branch_id"]))
+                    report[int(row["branch_id"])] = row
                 except Exception:
                     continue
-        if bad_ids:
-            break
-    return bad_ids
+            return report
+    return {}
 
 
 def branch_id_from_name(name: str) -> Optional[int]:
@@ -261,10 +196,8 @@ class VTKArteryViewer(QMainWindow):
         self.obj_path: Optional[Path] = None
         self.mesh: Optional[ObjMesh] = None
         self.report: Dict[int, Dict[str, str]] = {}
-        self.bad_reprojection_branch_ids: set[int] = set()
         self.summary: Dict[str, object] = {}
         self.branch_actors: Dict[int, List[vtk.vtkActor]] = {}
-        self.connector_actors: List[vtk.vtkActor] = []
         self.all_actors: List[vtk.vtkActor] = []
         self.orientation_widget: Optional[vtk.vtkOrientationMarkerWidget] = None
 
@@ -301,13 +234,6 @@ class VTKArteryViewer(QMainWindow):
         self.spin_secondary.setFixedWidth(90)
         self.btn_apply_angle = QPushButton("Apply Angle")
         self.btn_apply_angle.clicked.connect(self.apply_manual_angle_view)
-        self.chk_hide_bad = QCheckBox("Hide Bad Branches")
-        self.chk_hide_bad.setToolTip("Hide branches marked red/bad in final reprojection validation.")
-        self.chk_hide_bad.stateChanged.connect(self.apply_branch_visibility_filter)
-        self.chk_show_connectors = QCheckBox("Show Connectors")
-        self.chk_show_connectors.setChecked(True)
-        self.chk_show_connectors.setToolTip("Show light-gray estimated connector tubes between likely vessel gaps.")
-        self.chk_show_connectors.stateChanged.connect(self.apply_branch_visibility_filter)
         self.combo_image_orientation = QComboBox()
         self.combo_image_orientation.addItems(
             [
@@ -372,8 +298,6 @@ class VTKArteryViewer(QMainWindow):
         controls.addWidget(QLabel("Image"))
         controls.addWidget(self.combo_image_orientation)
         controls.addWidget(self.btn_apply_angle)
-        controls.addWidget(self.chk_hide_bad)
-        controls.addWidget(self.chk_show_connectors)
         controls.addStretch(1)
         left_layout.addLayout(controls)
         left_layout.addWidget(self.lbl_path)
@@ -410,19 +334,12 @@ class VTKArteryViewer(QMainWindow):
         try:
             self.mesh = parse_obj(path)
             self.report = load_branch_report(path)
-            self.bad_reprojection_branch_ids = load_bad_reprojection_branch_ids(path)
             self.summary = self.load_pipeline_summary(path)
             self.obj_path = path
             self.lbl_path.setText(str(path))
             self.populate_table()
             self.populate_validation_panel()
             self.update_angle_controls_from_summary()
-            self.chk_hide_bad.setEnabled(bool(self.bad_reprojection_branch_ids))
-            self.chk_hide_bad.setToolTip(
-                f"Hide bad reprojection branches: {sorted(self.bad_reprojection_branch_ids)}"
-                if self.bad_reprojection_branch_ids
-                else "No bad reprojection branch list found beside this OBJ."
-            )
             self.render_mesh()
         except Exception as exc:
             QMessageBox.critical(self, "Failed to load OBJ", str(exc))
@@ -464,44 +381,22 @@ class VTKArteryViewer(QMainWindow):
         return ""
 
     def load_pipeline_summary(self, obj_path: Path) -> Dict[str, object]:
-        names = [
-            "full_3d_reconstruction_summary.json",
-            "pipeline_summary.json",
-            "clinical_reconstruction_report.json",
-            "hybrid_qca_radius_summary.json",
-            "filtered_epipolar_summary.json",
-            "smoothed_junction_summary.json",
+        candidates = [
+            obj_path.with_name("pipeline_summary.json"),
+            obj_path.with_name("hybrid_qca_radius_summary.json"),
+            obj_path.with_name("filtered_epipolar_summary.json"),
+            obj_path.with_name("smoothed_junction_summary.json"),
         ]
-        merged: Dict[str, object] = {}
-        for folder in metadata_search_dirs(obj_path):
-            for name in names:
-                path = folder / name
-                if path.exists():
-                    try:
-                        import json
+        for path in candidates:
+            if path.exists():
+                try:
+                    import json
 
-                        with open(path, "r", encoding="utf-8") as f:
-                            payload = json.load(f)
-                        if isinstance(payload, dict):
-                            for key, value in payload.items():
-                                merged.setdefault(key, value)
-                        if name == "full_3d_reconstruction_summary.json":
-                            pipeline_summary = find_metadata_file(obj_path, ["pipeline_summary.json"])
-                            if pipeline_summary:
-                                with open(pipeline_summary, "r", encoding="utf-8") as f:
-                                    pipeline_payload = json.load(f)
-                                if isinstance(pipeline_payload, dict):
-                                    payload.setdefault("view_a", pipeline_payload.get("view_a"))
-                                    payload.setdefault("view_b", pipeline_payload.get("view_b"))
-                                    payload.setdefault("num_xa_clips_found", pipeline_payload.get("num_xa_clips_found"))
-                                    payload.setdefault("branch_status_counts", pipeline_payload.get("branch_status_counts"))
-                                    merged.setdefault("view_a", pipeline_payload.get("view_a"))
-                                    merged.setdefault("view_b", pipeline_payload.get("view_b"))
-                                    merged.setdefault("num_xa_clips_found", pipeline_payload.get("num_xa_clips_found"))
-                                    merged.setdefault("branch_status_counts", pipeline_payload.get("branch_status_counts"))
-                    except Exception:
-                        continue
-        return merged
+                    with open(path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception:
+                    continue
+        return {}
 
     def populate_validation_panel(self):
         self.lbl_summary.setText(self.format_summary_text())
@@ -516,44 +411,6 @@ class VTKArteryViewer(QMainWindow):
         if not self.summary:
             return "No summary JSON found beside this OBJ."
         lines = []
-        grading = self.summary.get("grading")
-        metrics = self.summary.get("metrics")
-        if isinstance(grading, dict):
-            confidence = str(grading.get("overall_confidence", "unknown")).upper()
-            lines.append(f"Clinical confidence: {confidence}")
-            statement = grading.get("clinical_use_statement")
-            if statement:
-                lines.append(str(statement))
-        if isinstance(metrics, dict):
-            lines.append(
-                "Validation: "
-                f"good {metrics.get('good_validation_branches', 0)} | "
-                f"review {metrics.get('review_validation_branches', 0)} | "
-                f"bad {metrics.get('bad_validation_branches', 0)}"
-            )
-            lines.append(
-                "3D confidence: "
-                f"usable {metrics.get('usable_3d_branches', 0)} | "
-                f"uncertain {metrics.get('uncertain_3d_branches', 0)} | "
-                f"estimated {metrics.get('estimated_3d_branches', 0)}"
-            )
-            lines.append(
-                f"Errors: median {metrics.get('max_median_reprojection_error_px', '?')} px | "
-                f"p90 {metrics.get('max_p90_reprojection_error_px', '?')} px"
-            )
-        selected_views = self.summary.get("selected_views")
-        if isinstance(selected_views, dict):
-            for key in ("view_a", "view_b"):
-                view = selected_views.get(key)
-                if isinstance(view, dict):
-                    lines.append(
-                        f"{key}: clip {view.get('clip_index', '?')} frame {view.get('frame', '?')} "
-                        f"P {view.get('primary_angle_deg', '?')} S {view.get('secondary_angle_deg', '?')}"
-                    )
-        if isinstance(grading, dict) and grading.get("warnings"):
-            lines.append("Warnings:")
-            for warning in grading.get("warnings", [])[:3]:
-                lines.append(f"- {warning}")
         if "branch_status_counts" in self.summary:
             counts = self.summary.get("branch_status_counts", {})
             lines.append(
@@ -580,46 +437,24 @@ class VTKArteryViewer(QMainWindow):
     def find_validation_images(self) -> List[Tuple[str, Path]]:
         if not self.obj_path:
             return []
-        image_names = [
-            ("View A Final Reprojection", "final_view_a_reprojection_validation.png"),
-            ("View B Final Reprojection", "final_view_b_reprojection_validation.png"),
-            ("View A Supported Reprojection", "final_view_a_supported_reprojection_validation.png"),
-            ("View B Supported Reprojection", "final_view_b_supported_reprojection_validation.png"),
-            ("View A Passing Reprojection", "final_view_a_passing_reprojection_validation.png"),
-            ("View B Passing Reprojection", "final_view_b_passing_reprojection_validation.png"),
-            ("View A Reprojection", "view_a_reprojection_validation.png"),
-            ("View B Reprojection", "view_b_reprojection_validation.png"),
-            ("View A Supported Reprojection", "view_a_supported_reprojection_validation.png"),
-            ("View B Supported Reprojection", "view_b_supported_reprojection_validation.png"),
-            ("View A Passing Reprojection", "view_a_passing_reprojection_validation.png"),
-            ("View B Passing Reprojection", "view_b_passing_reprojection_validation.png"),
-            ("View A Branch Mapping", "view_a_branch_mapping.png"),
-            ("View B Branch Mapping", "view_b_branch_mapping.png"),
-            ("View A Selected Frame", "view_a_frame.png"),
-            ("View B Selected Frame", "view_b_frame.png"),
-            ("View A Segmentation", "view_a_overlay.png"),
-            ("View B Segmentation", "view_b_overlay.png"),
-            ("View C / IM1 Segmentation", "view_c_overlay.png"),
-            ("View C / IM1 Validation", "view_c_im1_validation_overlay.png"),
-            ("View A Mask", "view_a_mask.png"),
-            ("View B Mask", "view_b_mask.png"),
-            ("View C / IM1 Mask", "view_c_mask.png"),
-            ("View A Skeleton", "view_a_skeleton.png"),
-            ("View B Skeleton", "view_b_skeleton.png"),
-            ("View C / IM1 Skeleton", "view_c_skeleton.png"),
-            ("Filtered IM0 Reprojection", "filtered_reprojection_IM0.png"),
-            ("Filtered IM2 Reprojection", "filtered_reprojection_IM2.png"),
-            ("Optimized IM0 Reprojection", "optimized_reprojection_IM0.png"),
-            ("Optimized IM2 Reprojection", "optimized_reprojection_IM2.png"),
+        folder = self.obj_path.parent
+        candidates = [
+            ("View A Segmentation", folder / "view_a_overlay.png"),
+            ("View B Segmentation", folder / "view_b_overlay.png"),
+            ("View C / IM1 Segmentation", folder / "view_c_overlay.png"),
+            ("View C / IM1 Validation", folder / "view_c_im1_validation_overlay.png"),
+            ("View A Mask", folder / "view_a_mask.png"),
+            ("View B Mask", folder / "view_b_mask.png"),
+            ("View C / IM1 Mask", folder / "view_c_mask.png"),
+            ("View A Skeleton", folder / "view_a_skeleton.png"),
+            ("View B Skeleton", folder / "view_b_skeleton.png"),
+            ("View C / IM1 Skeleton", folder / "view_c_skeleton.png"),
+            ("Filtered IM0 Reprojection", folder / "filtered_reprojection_IM0.png"),
+            ("Filtered IM2 Reprojection", folder / "filtered_reprojection_IM2.png"),
+            ("Optimized IM0 Reprojection", folder / "optimized_reprojection_IM0.png"),
+            ("Optimized IM2 Reprojection", folder / "optimized_reprojection_IM2.png"),
         ]
-        found: List[Tuple[str, Path]] = []
-        seen = set()
-        for label, name in image_names:
-            path = find_metadata_file(self.obj_path, [name])
-            if path and str(path) not in seen:
-                found.append((label, path))
-                seen.add(str(path))
-        return found
+        return [(label, path) for label, path in candidates if path.exists()]
 
     def update_overlay_image(self):
         if self.combo_overlay.count() == 0:
@@ -643,7 +478,6 @@ class VTKArteryViewer(QMainWindow):
             return
         self.renderer.RemoveAllViewProps()
         self.branch_actors = {}
-        self.connector_actors = []
         self.all_actors = []
 
         for part in self.mesh.parts:
@@ -658,38 +492,16 @@ class VTKArteryViewer(QMainWindow):
             actor.GetProperty().SetSpecular(0.28)
             actor.GetProperty().SetSpecularPower(22)
             actor.GetProperty().SetInterpolationToPhong()
-            if part.material == "estimated_connector":
-                actor.GetProperty().SetOpacity(0.38)
-                actor.GetProperty().EdgeVisibilityOn()
-                actor.GetProperty().SetEdgeColor(0.92, 0.94, 0.96)
-                actor.GetProperty().SetLineWidth(1.0)
-                actor.GetProperty().SetSpecular(0.08)
 
             self.renderer.AddActor(actor)
             self.all_actors.append(actor)
-            if part.material == "estimated_connector":
-                self.connector_actors.append(actor)
             branch_id = branch_id_from_name(part.name)
             if branch_id is not None:
                 self.branch_actors.setdefault(branch_id, []).append(actor)
 
         self.add_orientation_marker()
 
-        self.apply_branch_visibility_filter(render=False)
         self.reset_camera()
-
-    def apply_branch_visibility_filter(self, state=None, render: bool = True):
-        hide_bad = self.chk_hide_bad.isChecked() if hasattr(self, "chk_hide_bad") else False
-        hidden_ids = self.bad_reprojection_branch_ids if hide_bad else set()
-        show_connectors = self.chk_show_connectors.isChecked() if hasattr(self, "chk_show_connectors") else True
-        for branch_id, actors in self.branch_actors.items():
-            visible = branch_id not in hidden_ids
-            for actor in actors:
-                actor.SetVisibility(1 if visible else 0)
-        for actor in self.connector_actors:
-            actor.SetVisibility(1 if show_connectors else 0)
-        if render:
-            self.vtk_widget.GetRenderWindow().Render()
 
     def add_orientation_marker(self):
         if self.orientation_widget is not None:
@@ -862,23 +674,13 @@ class VTKArteryViewer(QMainWindow):
             return
 
         rotation = self.rotation_from_angles(primary_deg, secondary_deg)
-        # Local +Z is source->detector and local +Y is the detector's row
-        # axis (positive = further down the image), per
-        # scripts/epipolar_optimized_centerline.py::project_points -- a VTK
-        # camera needs the opposite sign on both to render right-side-up
-        # relative to the original angiogram (verified against real cases;
-        # using local +Z/+Y directly renders vertically flipped).
-        source_direction = rotation @ np.array([0.0, 0.0, 1.0], dtype=float)
-        detector_up = rotation @ np.array([0.0, -1.0, 0.0], dtype=float)
+        source_direction = rotation @ np.array([0.0, 0.0, -1.0], dtype=float)
+        detector_up = rotation @ np.array([0.0, 1.0, 0.0], dtype=float)
         source_direction, detector_up = self.apply_image_orientation(source_direction, detector_up)
         self.set_absolute_camera(source_direction, detector_up, scale_factor=0.62, distance_factor=3.0)
 
     def set_summary_angle_view(self, key: str):
         view = self.summary.get(key) if isinstance(self.summary, dict) else None
-        if not isinstance(view, dict) and isinstance(self.summary, dict):
-            selected_views = self.summary.get("selected_views")
-            if isinstance(selected_views, dict):
-                view = selected_views.get(key)
         if not isinstance(view, dict):
             QMessageBox.information(self, "No DICOM Angle", f"No {key} angle found beside this OBJ.")
             return
@@ -903,10 +705,6 @@ class VTKArteryViewer(QMainWindow):
 
         for branch_id, actors in self.branch_actors.items():
             for actor in actors:
-                if self.chk_hide_bad.isChecked() and branch_id in self.bad_reprojection_branch_ids:
-                    actor.SetVisibility(0)
-                    continue
-                actor.SetVisibility(1)
                 base_status = self.status_from_parts(branch_id)
                 base_color = MATERIAL_COLORS.get(base_status, (0.78, 0.78, 0.78))
                 if selected_branch is not None and branch_id == selected_branch:

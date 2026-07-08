@@ -7,10 +7,13 @@ an arbitrary frame via Seek (e.g. dragging the frame slider) -- reusing the
 exact same frame_pipeline path as the live preview (desktop_app_qca.py) and
 the offline QCA report generator, so results are consistent everywhere.
 
-Per-frame QCA (skeletonization, branch decomposition, sub-pixel lesion
-refinement) takes on the order of a second, so this deliberately does not
-try to play back at the source frame rate -- each frame is fully analyzed
-before the next is shown, paced by that analysis time itself.
+Per-frame processing is dominated by the segmentation and localization
+neural network passes (each a few hundred ms on CPU) -- skeletonization and
+lesion detection (QCA proper) are cheap by comparison (tens of ms) and
+always run in full, every frame, so the stenosis overlay never lags behind
+or misaligns with the picture on screen. This deliberately does not try to
+play back at the source frame rate -- each frame is fully analyzed before
+the next is shown, paced by that analysis time itself.
 """
 import time
 
@@ -18,8 +21,11 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
-from qca import QCAConfig, draw_overlay
-from frame_pipeline import preprocess_frame, segment_frame, run_localization_frame, run_qca_frame
+from qca import QCAConfig
+from frame_pipeline import (
+    preprocess_frame, segment_frame, run_localization_frame, clean_vessel_mask, run_qca_from_clean_mask,
+)
+from report_engine import draw_live_stenosis_overlay
 
 
 class DicomAnalysisThread(QThread):
@@ -108,15 +114,10 @@ class DicomAnalysisThread(QThread):
             if self.loc_model is not None:
                 try:
                     self._loc_class_map, self._loc_confidence_map = run_localization_frame(
-                        self.loc_model, img_rgb_enhanced
+                        self.loc_model, img_rgb_enhanced, mask_binary
                     )
                 except Exception:
                     self._loc_class_map, self._loc_confidence_map = None, None
-
-            branches, lesions, dt, bw = run_qca_frame(
-                img_gray, mask_binary, self.qca_cfg,
-                class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
-            )
 
             overlay = img_rgb_original.copy()
             color = np.array(self.overlay_color, dtype=np.uint8)
@@ -125,8 +126,19 @@ class DicomAnalysisThread(QThread):
                 overlay, self.overlay_alpha, img_rgb_original, 1.0 - self.overlay_alpha, 0
             )
 
+            # Both halves of QCA are cheap relative to the neural network
+            # passes above (tens of ms vs hundreds), so both run in full every
+            # frame -- the overlay (contour + centerline + lesions) always
+            # matches exactly what's on screen, never a held-over stale result.
+            bw = clean_vessel_mask(mask_binary, self.qca_cfg)
+            branches, lesions, dt = run_qca_from_clean_mask(
+                bw, self.qca_cfg,
+                class_map=self._loc_class_map, confidence_map=self._loc_confidence_map,
+                use_merged_labels=(self.loc_model.use_merged_labels if self.loc_model is not None else False),
+            )
+
             if branches:
-                qca_vis_bgr = draw_overlay(img_gray, bw, branches, lesions)
+                qca_vis_bgr = draw_live_stenosis_overlay(img_gray, bw, branches, lesions)
                 qca_vis_rgb = cv2.cvtColor(qca_vis_bgr, cv2.COLOR_BGR2RGB)
                 if lesions:
                     top = lesions[0]

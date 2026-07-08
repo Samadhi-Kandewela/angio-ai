@@ -109,23 +109,6 @@ def build_stylesheet() -> str:
         color: {ASH_DIM};
         font-size: 10.5px;
     }}
-    QLabel[role="detailText"] {{
-        color: {WHITE};
-        font-size: 13px;
-    }}
-    QLabel[role="captionText"] {{
-        color: {ASH};
-        font-size: 10.5px;
-    }}
-    QLabel[role="metricValue"] {{
-        color: {WHITE};
-        font-size: 13px;
-        font-weight: 700;
-    }}
-    QFrame[role="divider"] {{
-        background-color: {BORDER};
-        border: none;
-    }}
     QLabel[role="fieldLabel"] {{
         color: {ASH};
         font-size: 11.5px;
@@ -210,20 +193,6 @@ def build_stylesheet() -> str:
     }}
 
     /* ── Buttons ─────────────────────────────────────────────────── */
-    QProgressBar {{
-        background-color: {SURFACE_ALT};
-        color: {WHITE};
-        border: 1px solid {BORDER};
-        border-radius: 6px;
-        text-align: center;
-        height: 18px;
-        font-weight: 600;
-    }}
-    QProgressBar::chunk {{
-        background-color: {ACCENT};
-        border-radius: 5px;
-    }}
-
     QPushButton {{
         background-color: {SURFACE_ALT};
         color: {WHITE};
@@ -279,13 +248,6 @@ def build_stylesheet() -> str:
     QListWidget::item:selected {{
         background-color: {BORDER};
         color: {ACCENT};
-    }}
-    QListWidget#seriesList, QListWidget#savedViewsList {{
-        border-radius: 8px;
-    }}
-    QListWidget#seriesList::item, QListWidget#savedViewsList::item {{
-        padding: 8px 10px;
-        min-height: 42px;
     }}
 
     /* ── Status bar ──────────────────────────────────────────────── */

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -33,7 +34,7 @@ import vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 import patient_store
-from case_analysis_workflow import lesion_panel_path, lesions_3d_path, reconstruction_dir, reconstruction_obj
+from case_analysis_workflow import is_3d_ready, lesion_panel_path, lesions_3d_path, reconstruction_dir, reconstruction_obj
 
 
 def _card() -> QFrame:
@@ -69,17 +70,37 @@ class ThreeDViewerPage(QWidget):
         root.setContentsMargins(28, 24, 28, 20)
         root.setSpacing(14)
 
+        header_row = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title_col.setSpacing(4)
         title = QLabel("3D Coronary Viewer")
         title.setProperty("role", "pageTitle")
-        root.addWidget(title)
+        title_col.addWidget(title)
 
-        self.lbl_status = QLabel("Open a completed case from DICOM Analysis.")
+        self.lbl_status = QLabel("Select a case with a completed 3D reconstruction.")
         self.lbl_status.setProperty("role", "pageSubtitle")
         self.lbl_status.setWordWrap(True)
-        root.addWidget(self.lbl_status)
+        title_col.addWidget(self.lbl_status)
+        header_row.addLayout(title_col, stretch=1)
 
+        self.btn_change_case = QPushButton("Change Case")
+        self.btn_change_case.setProperty("variant", "ghost")
+        self.btn_change_case.clicked.connect(self._show_case_select)
+        self.btn_change_case.setVisible(False)
+        header_row.addWidget(self.btn_change_case, alignment=Qt.AlignTop)
+        root.addLayout(header_row)
+
+        self.content_stack = QStackedWidget()
+        root.addWidget(self.content_stack, stretch=1)
+
+        self.content_stack.addWidget(self._build_case_select_page())
+
+        viewer_page = QWidget()
+        viewer_layout = QVBoxLayout(viewer_page)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
         splitter = QSplitter(Qt.Horizontal)
-        root.addWidget(splitter, stretch=1)
+        viewer_layout.addWidget(splitter)
+        self.content_stack.addWidget(viewer_page)
 
         view_card = _card()
         view_layout = QVBoxLayout(view_card)
@@ -197,6 +218,81 @@ class ThreeDViewerPage(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
 
+    def _build_case_select_page(self) -> QWidget:
+        """The page's default screen. Deliberately holds no VTK widget: the
+        QVTKRenderWindowInteractor is a native child window, and on Windows
+        an unrendered one left mounted behind a QStackedWidget page can show
+        stale content from whatever page was underneath it instead of going
+        blank. Not creating it until a case is actually chosen avoids that."""
+        page = _card()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        header = QLabel("Open a case")
+        header.setProperty("role", "sectionHeader")
+        layout.addWidget(header)
+
+        caption = QLabel("Cases with a completed 3D reconstruction are listed below.")
+        caption.setProperty("role", "captionText")
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+
+        self.list_case_select = QListWidget()
+        self.list_case_select.itemDoubleClicked.connect(lambda _item: self._on_view_3d_from_list())
+        self.list_case_select.currentRowChanged.connect(
+            lambda row: self.btn_view_3d_from_list.setEnabled(row >= 0)
+        )
+        layout.addWidget(self.list_case_select, stretch=1)
+
+        self.lbl_case_select_empty = QLabel(
+            "No cases have a completed 3D reconstruction yet. Run one from DICOM Analysis first."
+        )
+        self.lbl_case_select_empty.setProperty("role", "captionText")
+        self.lbl_case_select_empty.setWordWrap(True)
+        self.lbl_case_select_empty.setVisible(False)
+        layout.addWidget(self.lbl_case_select_empty)
+
+        self.btn_view_3d_from_list = QPushButton("View 3D")
+        self.btn_view_3d_from_list.setProperty("variant", "primary")
+        self.btn_view_3d_from_list.setEnabled(False)
+        self.btn_view_3d_from_list.clicked.connect(self._on_view_3d_from_list)
+        layout.addWidget(self.btn_view_3d_from_list)
+
+        return page
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.content_stack.currentIndex() == 0:
+            self._refresh_case_select_list()
+
+    def _refresh_case_select_list(self):
+        self.list_case_select.clear()
+        cases = [c for c in patient_store.list_cases() if is_3d_ready(c["case_id"])]
+        for case in cases:
+            label = case.get("full_name") or case.get("patient_id") or case["case_id"]
+            study_date = case.get("study_date") or ""
+            item = QListWidgetItem(f"{label}\n{case['case_id']}" + (f" | {study_date}" if study_date else ""))
+            item.setData(Qt.UserRole, case["case_id"])
+            self.list_case_select.addItem(item)
+        self.lbl_case_select_empty.setVisible(not cases)
+        self.list_case_select.setVisible(bool(cases))
+        self.btn_view_3d_from_list.setEnabled(False)
+
+    def _show_case_select(self):
+        self.content_stack.setCurrentIndex(0)
+        self.btn_change_case.setVisible(False)
+        self.lbl_status.setText("Select a case with a completed 3D reconstruction.")
+        self._refresh_case_select_list()
+
+    def _on_view_3d_from_list(self):
+        item = self.list_case_select.currentItem()
+        if item is None:
+            return
+        case_id = item.data(Qt.UserRole)
+        if not self.load_case(case_id):
+            return
+
     def _divider(self) -> QFrame:
         line = QFrame()
         line.setProperty("role", "divider")
@@ -232,6 +328,7 @@ class ThreeDViewerPage(QWidget):
                 f"3D reconstruction is not ready for case {case_id} yet. "
                 f"Missing: {obj_path.name if not obj_path.exists() else package_path.name}"
             )
+            self._show_case_select()
             self.lbl_status.setText(self.last_error)
             return False
 
@@ -240,6 +337,7 @@ class ThreeDViewerPage(QWidget):
         except (json.JSONDecodeError, OSError) as exc:
             self._clear_view()
             self.last_error = f"Failed to load 3D lesion package: {exc}"
+            self._show_case_select()
             self.lbl_status.setText(self.last_error)
             return False
 
@@ -262,6 +360,8 @@ class ThreeDViewerPage(QWidget):
             ]
 
         try:
+            self.content_stack.setCurrentIndex(1)
+            self.btn_change_case.setVisible(True)
             self.lbl_status.setText(f"Loaded case {case_id}: {obj_path.name}")
             self._load_mesh(obj_path)
             self._load_lesions()
@@ -275,6 +375,7 @@ class ThreeDViewerPage(QWidget):
         except Exception as exc:
             self._clear_view()
             self.last_error = f"Failed to render 3D reconstruction for case {case_id}: {exc}"
+            self._show_case_select()
             self.lbl_status.setText(self.last_error)
             return False
 

@@ -538,7 +538,6 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
         washed_out = [rec for rec in frame_records if rec.frame_idx not in picked
                      and coverage[rec.frame_idx] < quality_floor]
         _greedy_fill(washed_out)
-
     if not picked:
         ranked = sorted(frame_records, key=_vessel_coverage, reverse=True)
         for rec in ranked:
@@ -563,7 +562,6 @@ def draw_angle_summary_bgr(rec: FrameRecord, tracks: List[LesionTrack]) -> np.nd
     not this single frame's own noisier per-frame reading. Shared by the PDF
     report and the in-app key-frames summary so the two never show different
     numbers for the same lesion.
-
     Lesion spans are alpha-blended onto the frame rather than solid-filled, so
     the vessel structure stays visible underneath instead of a hard-edged
     color block, and labels use the same collision-avoiding placement as

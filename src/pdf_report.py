@@ -21,6 +21,7 @@ from report_engine import (
     AngleResult, FrameRecord, LesionTrack, draw_angle_summary_bgr, generate_reasoning,
     merge_cross_view_lesions,
 )
+from localization_labels import MAIN_BRANCH_ROLLUP, MAIN_BRANCH_ORDER
 
 _SEVERITY_RGB_MPL = {
     "SEVERE": "#D62728",
@@ -83,15 +84,22 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
     # were a separate finding.
     merged_lesions = merge_cross_view_lesions(view_summaries)
 
+    all_lesions = [(vs, les) for vs in view_summaries for les in vs.get("lesions", [])]
+    all_lesions.sort(key=lambda pair: pair[1]["DS_percent"], reverse=True)
+
     any_localization = any(vs.get("has_localization") for vs in view_summaries)
     all_localization = all(vs.get("has_localization") for vs in view_summaries) if view_summaries else True
 
     with PdfPages(out_path) as pdf:
-        _add_diagnosis_title_page(pdf, patient_info, view_summaries, merged_lesions)
+        _add_patient_details_findings_page(pdf, patient_info, view_summaries, all_lesions)
+
+        _add_diagnosis_title_page(pdf, view_summaries, merged_lesions)
 
         _add_lesion_detail_pages(pdf, merged_lesions)
 
         for vs in view_summaries:
+            if vs.get("lesions") and vs.get("summary_image"):
+                _add_diagnosis_view_page(pdf, vs)
             _add_diagnosis_key_frame_pages(pdf, vs)
 
         _add_methodology_page(pdf, cfg, any_localization, all_localization, include_cross_view_note=True)
@@ -99,15 +107,86 @@ def render_clinical_diagnosis_report(out_path, patient_info: Dict[str, str],
     return out_path
 
 
-def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict],
-                              merged_lesions: List[dict]):
+def _add_patient_details_findings_page(pdf, patient_info: Dict[str, str], view_summaries: List[dict], all_lesions):
     """
-    merged_lesions: one entry per real, cross-view-deduplicated finding (see
-    report_engine.merge_cross_view_lesions) -- the same anatomical location
-    detected independently by more than one view is listed once, at its
-    highest-severity reading, with "n_views" recording how many views
-    corroborated it.
+    Page 1: patient demographics plus a one-line-per-branch "Angiogram
+    Findings" summary across the six main branches (see
+    MAIN_BRANCH_ROLLUP) -- mirrors the paper cath-lab form this report
+    replaces, where each major vessel is marked normal or annotated with its
+    finding rather than only listing detected lesions.
     """
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
+
+    ax = fig.add_axes((0.08, 0.06, 0.84, 0.86))
+    ax.axis("off")
+
+    ax.text(0, 0.995, "⚠ AI-GENERATED ANALYSIS — for clinical correlation, not a standalone diagnosis",
+            transform=ax.transAxes, fontsize=10.5, fontweight="bold", color="#D62728", va="top")
+
+    y = 0.94
+    ax.text(0, y, "Patient Details", transform=ax.transAxes, fontsize=13, fontweight="bold", va="top")
+    y -= 0.05
+
+    view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
+    details = [
+        ("Patient ID", patient_info.get("patient_id") or "Not specified"),
+        ("Full Name", patient_info.get("full_name") or "Not specified"),
+        ("Age / Gender", f"{patient_info.get('age') or '—'} / {patient_info.get('gender') or '—'}"),
+        ("Study Date", patient_info.get("study_date") or "Not specified"),
+        ("Operator", patient_info.get("operator") or "Not specified"),
+        ("Report Generated", datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Views Analyzed", f"{len(view_summaries)} ({view_names})"),
+    ]
+    for label, value in details:
+        ax.text(0, y, f"{label}:", transform=ax.transAxes, fontsize=10.5, fontweight="bold", va="top")
+        ax.text(0.32, y, str(value), transform=ax.transAxes, fontsize=10.5, va="top")
+        y -= 0.038
+
+    y -= 0.03
+    ax.text(0, y, "Angiogram Findings", transform=ax.transAxes, fontsize=13, fontweight="bold", va="top")
+    y -= 0.05
+
+    lesions_by_branch: Dict[str, list] = {name: [] for name in MAIN_BRANCH_ORDER}
+    other = []
+    for vs, les in all_lesions:
+        branch = MAIN_BRANCH_ROLLUP.get(les.get("group"))
+        if branch is None:
+            other.append((vs, les))
+        else:
+            lesions_by_branch[branch].append((vs, les))
+
+    for branch in MAIN_BRANCH_ORDER:
+        items = lesions_by_branch[branch]
+        ax.text(0, y, branch, transform=ax.transAxes, fontsize=10.5, fontweight="bold", va="top")
+        if not items:
+            ax.text(0.24, y, "Normal — no significant stenosis detected.",
+                    transform=ax.transAxes, fontsize=10, va="top", color="#2E7D32")
+            y -= 0.04
+        else:
+            items.sort(key=lambda pair: pair[1]["DS_percent"], reverse=True)
+            worst_vs, worst_les = items[0]
+            color = _SEVERITY_RGB_MPL.get(worst_les["severity"], "black")
+            summary = (
+                f"{len(items)} finding(s) — worst: {worst_les['severity']} "
+                f"({worst_les['DS_percent']:.0f}% DS) in {worst_les['label']} ({worst_vs['view_label']})"
+            )
+            for wrapped in textwrap.wrap(summary, width=62):
+                ax.text(0.24, y, wrapped, transform=ax.transAxes, fontsize=10, va="top", color=color)
+                y -= 0.034
+        y -= 0.016
+
+    if other:
+        y -= 0.02
+        ax.text(0, y, f"Other findings ({len(other)}): not localized to a main branch "
+                       "(side-branch or no anatomical localization available).",
+                transform=ax.transAxes, fontsize=9, style="italic", va="top", color="#555555")
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _add_diagnosis_title_page(pdf, view_summaries: List[dict], merged_lesions: List[dict]):
     fig = plt.figure(figsize=(8.5, 11))
     fig.suptitle("Coronary Angiography Clinical Diagnosis Report", fontsize=18, fontweight="bold", y=0.97)
 
@@ -119,10 +198,6 @@ def _add_diagnosis_title_page(pdf, patient_info: Dict[str, str], view_summaries:
 
     view_names = ", ".join(vs["view_label"] for vs in view_summaries) if view_summaries else "none"
     lines = [
-        f"Patient ID: {patient_info.get('patient_id') or 'Not specified'}",
-        f"Patient Name: {patient_info.get('full_name') or 'Not specified'}",
-        f"Study Date: {patient_info.get('study_date') or 'Not specified'}",
-        f"Operator: {patient_info.get('operator') or 'Not specified'}",
         f"Report generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"Angiographic views analyzed: {len(view_summaries)} ({view_names})",
         "",
@@ -287,6 +362,44 @@ def _add_diagnosis_key_frame_pages(pdf, view_summary: dict):
 
         pdf.savefig(fig)
         plt.close(fig)
+
+
+def _add_diagnosis_view_page(pdf, view_summary: dict):
+    view_dir = view_summary.get("_view_dir")
+    image_name = view_summary.get("summary_image")
+    if not view_dir or not image_name:
+        return
+    image_path = Path(view_dir) / image_name
+    if not image_path.exists():
+        return
+
+    img = plt.imread(str(image_path))
+
+    fig = plt.figure(figsize=(8.5, 11))
+    ax_img = fig.add_axes((0.06, 0.20, 0.88, 0.68))
+    ax_img.imshow(img)
+    ax_img.axis("off")
+    ax_img.set_title(f"{view_summary['view_label']} — Stenosis Location & Severity",
+                     fontsize=14, fontweight="bold")
+
+    lesions = view_summary.get("lesions", [])
+    shown = sum(1 for les in lesions if les.get("co_visible_in_summary_frame"))
+    caption = (
+        f"{shown} of {len(lesions)} detected lesion(s) in this view are co-visible in this diagram; "
+        "all are listed in the summary table."
+    )
+    fig.text(0.5, 0.155, caption, ha="center", fontsize=8.5, style="italic")
+
+    ax_legend = fig.add_axes((0.06, 0.03, 0.88, 0.10))
+    ax_legend.set_xlim(0, 1)
+    ax_legend.set_ylim(0, 1)
+    ax_legend.axis("off")
+    for i, (label, color) in enumerate([("SEVERE (≥70% DS)", "#D62728"), ("SIGNIFICANT (50–69% DS)", "#FF7F0E")]):
+        ax_legend.scatter([0.05 + i * 0.4], [0.5], color=color, s=80)
+        ax_legend.text(0.09 + i * 0.4, 0.5, label, fontsize=9, va="center")
+
+    pdf.savefig(fig)
+    plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

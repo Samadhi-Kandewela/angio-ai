@@ -146,7 +146,23 @@ def list_cases(root_dir: Optional[Path] = None, search: Optional[str] = None) ->
     it's kept in sync / self-healed.
     """
     root = Path(root_dir) if root_dir else DEFAULT_PATIENT_DATA_ROOT
-    return patient_db.list_cases(root_dir=root, search=search)
+    cases = patient_db.list_cases(root_dir=root, search=search)
+    live_cases = []
+    stale_case_ids = []
+
+    for case in cases:
+        case_id = case.get("case_id")
+        if not case_id:
+            continue
+        if (root / case_id / "metadata.json").exists():
+            live_cases.append(case)
+        else:
+            stale_case_ids.append(case_id)
+
+    for case_id in stale_case_ids:
+        patient_db.delete_case(case_id, root_dir=root)
+
+    return live_cases
 
 
 def get_case_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:

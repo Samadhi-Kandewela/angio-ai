@@ -1,11 +1,4 @@
-"""
-Main window shell: a left navigation rail plus a stacked content area.
-
-"New Patient" and "Local DICOM Analysis" are implemented. Live Stream
-Analysis and 3D Viewer are implemented. Live Stream Analysis, Reports, and
-Settings remain disabled placeholders -- this shell is the scaffold they plug
-into as they're built in later iterations.
-"""
+"""Main window shell: a left navigation rail plus a stacked content area."""
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
@@ -20,16 +13,21 @@ from ecg_analysis_page import EcgAnalysisPage
 from live_stream_page import LiveStreamPage
 
 
-# (label, enabled) -- enabled rows get a real page; disabled ones are future work.
 NAV_ITEMS = [
     ("New Patient", True),
     ("Patient Records", True),
     ("DICOM Analysis", True),
-    ("Live Stream Analysis", False),
-    ("3D Viewer", True),
     ("ECG Analysis", True),
     ("Live Stream Analysis", True),
+    ("3D Viewer", True),
 ]
+
+NAV_NEW_PATIENT = 0
+NAV_PATIENT_RECORDS = 1
+NAV_DICOM_ANALYSIS = 2
+NAV_ECG_ANALYSIS = 3
+NAV_LIVE_STREAM = 4
+NAV_3D_VIEWER = 5
 
 
 class AppWindow(QMainWindow):
@@ -52,27 +50,32 @@ class AppWindow(QMainWindow):
 
         self.patient_intake_page = PatientIntakePage()
         self.patient_intake_page.case_created.connect(self._on_case_created)
-        self._add_page(0, self.patient_intake_page)
+        self._add_page(NAV_NEW_PATIENT, self.patient_intake_page)
 
         self.patient_records_page = PatientRecordsPage()
         self.patient_records_page.go_to_dicom_analysis.connect(self._on_go_to_dicom_analysis)
-        self._add_page(1, self.patient_records_page)
+        self._add_page(NAV_PATIENT_RECORDS, self.patient_records_page)
 
         self.dicom_analysis_page = LocalDicomAnalysisPage()
-        self.dicom_analysis_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(0))
-        self.dicom_analysis_page.view_3d_requested.connect(self._open_3d_viewer_for_case)
-        self._add_page(1, self.dicom_analysis_page)
-        self._add_page(2, self.dicom_analysis_page)
+        self.dicom_analysis_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(NAV_NEW_PATIENT))
+        if hasattr(self.dicom_analysis_page, "view_3d_requested"):
+            self.dicom_analysis_page.view_3d_requested.connect(self._open_3d_viewer_for_case)
+        self._add_page(NAV_DICOM_ANALYSIS, self.dicom_analysis_page)
 
         self.ecg_analysis_page = EcgAnalysisPage()
-        self.ecg_analysis_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(0))
-        self._add_page(3, self.ecg_analysis_page)
+        self.ecg_analysis_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(NAV_NEW_PATIENT))
+        self._add_page(NAV_ECG_ANALYSIS, self.ecg_analysis_page)
 
         self.live_stream_page = LiveStreamPage()
-        self._add_page(4, self.live_stream_page)
+        self.live_stream_page.go_to_new_patient.connect(lambda: self.nav_list.setCurrentRow(NAV_NEW_PATIENT))
+        self._add_page(NAV_LIVE_STREAM, self.live_stream_page)
 
         self.three_d_viewer_page = ThreeDViewerPage()
-        self._add_page(3, self.three_d_viewer_page)
+        if hasattr(self.three_d_viewer_page, "create_reconstruction_requested"):
+            self.three_d_viewer_page.create_reconstruction_requested.connect(
+                lambda: self.nav_list.setCurrentRow(NAV_DICOM_ANALYSIS)
+            )
+        self._add_page(NAV_3D_VIEWER, self.three_d_viewer_page)
 
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
 
@@ -135,11 +138,11 @@ class AppWindow(QMainWindow):
         self.patient_records_page.refresh()
 
     def _on_go_to_dicom_analysis(self, case_id: str):
-        self.nav_list.setCurrentRow(2)
+        self.nav_list.setCurrentRow(NAV_DICOM_ANALYSIS)
         self.dicom_analysis_page.select_case_by_id(case_id)
 
     def _open_3d_viewer_for_case(self, case_id: str):
-        self.nav_list.setCurrentRow(3)
+        self.nav_list.setCurrentRow(NAV_3D_VIEWER)
         QApplication.processEvents()
         if self.three_d_viewer_page.load_case(case_id):
             self.statusBar().showMessage(f"3D Viewer loaded case: {case_id}")

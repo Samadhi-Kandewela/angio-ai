@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -51,6 +51,8 @@ def _hex_to_rgb01(color: str) -> tuple[float, float, float]:
 
 
 class ThreeDViewerPage(QWidget):
+    create_reconstruction_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.case_id: Optional[str] = None
@@ -226,38 +228,63 @@ class ThreeDViewerPage(QWidget):
         blank. Not creating it until a case is actually chosen avoids that."""
         page = _card()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(18)
 
-        header = QLabel("Open a case")
+        top = QVBoxLayout()
+        top.setSpacing(6)
+        header = QLabel("3D Reconstruction Workspace")
         header.setProperty("role", "sectionHeader")
-        layout.addWidget(header)
+        top.addWidget(header)
 
-        caption = QLabel("Cases with a completed 3D reconstruction are listed below.")
+        caption = QLabel("Open an existing 3D reconstruction, or create one from a DICOM case.")
         caption.setProperty("role", "captionText")
         caption.setWordWrap(True)
-        layout.addWidget(caption)
+        top.addWidget(caption)
+        layout.addLayout(top)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(12)
+
+        self.btn_view_3d_from_list = QPushButton("Open Case")
+        self.btn_view_3d_from_list.setProperty("variant", "primary")
+        self.btn_view_3d_from_list.setMinimumHeight(42)
+        self.btn_view_3d_from_list.setEnabled(False)
+        self.btn_view_3d_from_list.clicked.connect(self._on_view_3d_from_list)
+        action_row.addWidget(self.btn_view_3d_from_list)
+
+        self.btn_create_reconstruction = QPushButton("Create 3D Reconstruction")
+        self.btn_create_reconstruction.setProperty("variant", "ghost")
+        self.btn_create_reconstruction.setMinimumHeight(42)
+        self.btn_create_reconstruction.clicked.connect(self.create_reconstruction_requested.emit)
+        action_row.addWidget(self.btn_create_reconstruction)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        list_header = QLabel("Completed reconstructions")
+        list_header.setProperty("role", "sectionHeader")
+        layout.addWidget(list_header)
 
         self.list_case_select = QListWidget()
+        self.list_case_select.setObjectName("savedViewsList")
+        self.list_case_select.setMinimumHeight(180)
+        self.list_case_select.setMaximumHeight(360)
         self.list_case_select.itemDoubleClicked.connect(lambda _item: self._on_view_3d_from_list())
         self.list_case_select.currentRowChanged.connect(
             lambda row: self.btn_view_3d_from_list.setEnabled(row >= 0)
         )
-        layout.addWidget(self.list_case_select, stretch=1)
+        layout.addWidget(self.list_case_select)
 
         self.lbl_case_select_empty = QLabel(
-            "No cases have a completed 3D reconstruction yet. Run one from DICOM Analysis first."
+            "No completed reconstructions yet. Use Create 3D Reconstruction to start from DICOM Analysis."
         )
         self.lbl_case_select_empty.setProperty("role", "captionText")
         self.lbl_case_select_empty.setWordWrap(True)
+        self.lbl_case_select_empty.setAlignment(Qt.AlignCenter)
         self.lbl_case_select_empty.setVisible(False)
         layout.addWidget(self.lbl_case_select_empty)
 
-        self.btn_view_3d_from_list = QPushButton("View 3D")
-        self.btn_view_3d_from_list.setProperty("variant", "primary")
-        self.btn_view_3d_from_list.setEnabled(False)
-        self.btn_view_3d_from_list.clicked.connect(self._on_view_3d_from_list)
-        layout.addWidget(self.btn_view_3d_from_list)
+        layout.addStretch(1)
 
         return page
 

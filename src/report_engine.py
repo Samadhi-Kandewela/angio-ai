@@ -54,11 +54,12 @@ TRACK_DISCARD_SCORE = -3.0
 # confirmed lesion rather than discarded as a false positive.
 TRACK_CONFIRM_SCORE = 4.0
 
-# Key frames are picked to guarantee every SEVERE/SIGNIFICANT lesion track has
+# Key frames are picked to guarantee every MODERATE/SIGNIFICANT/SEVERE lesion track has
 # supporting evidence in at least one frame (see select_key_frames), capped at
 # this many so the UI never has to lay out an unbounded number of panels.
 KEY_FRAME_MAX_COUNT = 5
 KEY_FRAME_MIN_GAP = 3
+KEY_FRAME_EVIDENCE_SEVERITIES = ("SEVERE", "SIGNIFICANT", "MODERATE")
 
 
 @dataclass
@@ -497,7 +498,7 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
     least once -- so each finding has real supporting evidence in the
     key-frames view, instead of being selected purely by vessel coverage and
     hoping every lesion happens to land in the top few frames (a run with
-    more distinct significant lesions than frames picked could otherwise
+    more distinct reportable lesions than frames picked could otherwise
     silently drop some of them).
 
     Picks are drawn from well-opacified frames first (vessel coverage within
@@ -520,7 +521,10 @@ def select_key_frames(frame_records: List[FrameRecord], tracks: List[LesionTrack
         return []
 
     track_of_lesion = {id(les): t for t in tracks for les in t.detections}
-    significant_ids = {t.track_id for t in tracks if t.representative["severity"] in ("SEVERE", "SIGNIFICANT")}
+    significant_ids = {
+        t.track_id for t in tracks
+        if t.representative["severity"] in KEY_FRAME_EVIDENCE_SEVERITIES
+    }
 
     frame_tracks = {}
     for rec in frame_records:
@@ -751,12 +755,12 @@ def build_frame_lesion_specs(rec: FrameRecord, tracks: List[LesionTrack]) -> Lis
         if t is None or t.track_id in drawn_track_ids:
             continue
         rep = t.representative
-        if rep["severity"] not in ("SEVERE", "SIGNIFICANT"):
+        if rep["severity"] not in KEY_FRAME_EVIDENCE_SEVERITIES:
             continue
         drawn_track_ids.add(t.track_id)
 
         y0, x0 = les["min_pt"]
-        radius = 16 if rep["severity"] == "SEVERE" else 13
+        radius = 16 if rep["severity"] == "SEVERE" else 13 if rep["severity"] == "SIGNIFICANT" else 10
         specs.append({
             "center": (x0, y0), "radius": radius,
             "color": _SEVERITY_BGR.get(rep["severity"], _SEVERITY_BGR["MILD"]),
@@ -769,7 +773,7 @@ def draw_frame_stenosis_only(rec: FrameRecord, tracks: List[LesionTrack]) -> np.
     """
     Plain-frame view of one frame's own detected stenosis: the original
     image plus a circle + short track-id tag (e.g. "L1") for each
-    significant lesion -- no vessel mask outline, no colored branch
+    reportable lesion -- no vessel mask outline, no colored branch
     skeleton. Used for the Key Frames panels so each picture stays
     uncluttered; full detail per tag belongs in that panel's caption text
     instead of crowding the image.
@@ -868,7 +872,7 @@ def draw_live_stenosis_overlay(img_gray: np.ndarray, bw: np.ndarray, branches: l
     """
     Live per-frame QCA visualization for the DICOM analysis viewer: vessel
     mask outline + colored branch skeleton (context, same as qca.draw_overlay),
-    plus a plain circle around every significant lesion (see
+    plus a plain circle around every moderate-or-higher lesion (see
     build_live_lesion_specs) instead of qca.draw_overlay's small filled-dot
     markers -- easier to read at a glance during continuous Play. Labels are
     off by default here (unlike draw_stenosis_overview) since text next to

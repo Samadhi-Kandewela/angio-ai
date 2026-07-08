@@ -26,9 +26,9 @@ import analysis_results_store
 import ecg_qca_concordance
 import ecg_results_store
 
-# angio-ai/src/clinical_app/ecg_analysis_page.py -> parents[3] == Pipeline/
-_PIPELINE_ROOT = Path(__file__).resolve().parents[3]
-_ECG_SRC_12LEAD = _PIPELINE_ROOT / "ECG" / "src_12lead"
+# angio-ai/src/clinical_app/ecg_analysis_page.py -> parents[2] == angio-ai/
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ECG_SRC_12LEAD = _PROJECT_ROOT / "ECG" / "src" / "src_12lead"
 if str(_ECG_SRC_12LEAD) not in sys.path:
     sys.path.insert(0, str(_ECG_SRC_12LEAD))
 

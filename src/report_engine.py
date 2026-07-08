@@ -281,6 +281,28 @@ def analyze_frame_list(frames: List[np.ndarray], angle_label: str,
     )
 
 
+
+# Artery-family pairs that share a real anatomical bifurcation (one vessel
+# splits into both, or one continues directly into the other) -- a lesion
+# sitting at or right next to that fork can be classified into either family
+# frame-to-frame by the localization model (or traced down either branch's
+# skeleton by the segmentation/branch-extraction step), the same way one
+# vessel's own adjacent segments can flip (see _update_track_candidates).
+# Used to keep a single lesion at a bifurcation from fragmenting into two
+# tracks purely because its artery label alternates.
+_BIFURCATION_ADJACENT_ARTERIES = {
+    frozenset({"LM", "LAD"}),
+    frozenset({"LM", "LCX"}),
+    frozenset({"LAD", "LCX"}),       # LM bifurcation itself
+    frozenset({"RCA", "RCA/PDA"}),   # RCA continues into a right-dominant PDA
+    frozenset({"LCX", "LCX/PDA"}),   # LCX continues into a left-dominant PDA
+}
+
+
+def _arteries_bifurcation_adjacent(a: str, b: str) -> bool:
+    return frozenset({a, b}) in _BIFURCATION_ADJACENT_ARTERIES
+
+
 def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, has_localization: bool) -> None:
     """
     Online lesion tracking with a hit/miss score, called once per analyzed
@@ -289,19 +311,27 @@ def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, h
     within TRACK_BOX_TOLERANCE_PX of that candidate's last known position (a
     bounding box sized to tolerate how much a lesion's apparent position
     shifts frame-to-frame with the cardiac cycle), and -- when a
-    localization model is available -- sharing its anatomical artery, so two
-    different vessels that happen to cross close together in this 2D
-    projection don't get matched to each other.
+    localization model is available -- sharing its anatomical artery (or an
+    artery from a bifurcation-adjacent family, see
+    _BIFURCATION_ADJACENT_ARTERIES), so two different vessels that happen to
+    cross close together in this 2D projection don't get matched to each
+    other.
 
     Gating on the *artery family* (e.g. "RCA") rather than the exact SYNTAX
     segment id is deliberate: the localization model can flip between two
     adjacent segments of the same vessel frame-to-frame for one real lesion
     that straddles (or sits near) the segment boundary (e.g. proximal vs mid
     RCA) -- an exact-segment veto would fragment that single lesion into two
-    separate tracks. Two genuinely distinct lesions on the same artery
+    separate tracks. The same flip happens right at a bifurcation between
+    two *different* artery families (e.g. a lesion at the LM bifurcation
+    alternately read as "mid LAD" or "distal LCX") -- allowed here too, for
+    the same reason. Two genuinely distinct lesions on the same artery
     (tandem stenoses) are still kept apart because they're expected to sit
     well outside TRACK_BOX_TOLERANCE_PX of each other -- the spatial gate
-    below, not the anatomical one, is what actually separates those.
+    below, not the anatomical one, is what actually separates those. The
+    same tradeoff applies to true "kissing" lesions at both branches of one
+    bifurcation simultaneously: a genuine rarity, and one this tracker
+    already accepts the risk of for same-artery adjacent segments.
 
     This is what actually fixes false positives: a detection that only ever
     appears in one or two frames (segmentation noise, a stray branch
@@ -326,8 +356,9 @@ def _update_track_candidates(candidates: List[_TrackCandidate], lesions: list, h
             if i in matched_indices:
                 continue  # one detection per candidate per frame
             if (has_localization and artery not in (None, "unknown")
-                    and cand.artery not in (None, "unknown") and cand.artery != artery):
-                continue  # different artery family -- definitely not the same lesion
+                    and cand.artery not in (None, "unknown") and cand.artery != artery
+                    and not _arteries_bifurcation_adjacent(cand.artery, artery)):
+                continue  # different, non-adjacent artery family -- definitely not the same lesion
             cy, cx = cand.last_pos
             dist = ((cy - y) ** 2 + (cx - x) ** 2) ** 0.5
             if dist <= TRACK_BOX_TOLERANCE_PX and (best_dist is None or dist < best_dist):
@@ -758,10 +789,10 @@ def build_live_lesion_specs(lesions: List[dict]) -> List[dict]:
     specs = []
     for les in lesions:
         sev = les.get("severity", "MILD")
-        if sev not in ("SEVERE", "SIGNIFICANT"):
+        if sev not in ("SEVERE", "SIGNIFICANT", "MODERATE"):
             continue
         y0, x0 = les["min_pt"]
-        radius = 16 if sev == "SEVERE" else 13
+        radius = 16 if sev == "SEVERE" else 13 if sev == "SIGNIFICANT" else 10
         occ = " [OCC]" if les.get("total_occlusion") else ""
         loc = les.get("localization")
         loc_part = f" - {loc['label']}" if loc and loc.get("artery", "unknown") != "unknown" else ""

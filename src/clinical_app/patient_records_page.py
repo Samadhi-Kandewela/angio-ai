@@ -218,6 +218,12 @@ class PatientRecordsPage(QWidget):
         dicom_sources = metadata.get("dicom_sources") or []
         sources_str = ", ".join(s.get("name", "?") for s in dicom_sources) or "—"
 
+        if metadata.get("echo_conducted"):
+            ef = metadata.get("ef_percent")
+            echo_str = f"Yes (EF {ef:.0f}%)" if ef is not None else "Yes (EF not specified)"
+        else:
+            echo_str = "No"
+
         html = (
             f"<b>Case ID:</b> {case_id}<br>"
             f"<b>Patient:</b> {metadata.get('full_name') or '—'} ({metadata.get('patient_id') or '—'})<br>"
@@ -228,6 +234,7 @@ class PatientRecordsPage(QWidget):
             f"<b>Referring Physician:</b> {metadata.get('referring_physician') or '—'}<br>"
             f"<b>Indication:</b> {metadata.get('indication') or '—'}<br>"
             f"<b>Risk Factors:</b> {risk_str}<br>"
+            f"<b>Echo Conducted / EF:</b> {echo_str}<br>"
             f"<b>Notes:</b> {metadata.get('notes') or '—'}<br>"
             f"<b>DICOM Source(s):</b> {sources_str} ({metadata.get('dicom_file_count', 0)} file(s))<br>"
             f"<b>Created:</b> {metadata.get('created_at') or '—'}"

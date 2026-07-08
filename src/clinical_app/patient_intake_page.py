@@ -8,7 +8,7 @@ patient_store.create_patient_case().
 """
 import os
 
-from PySide6.QtCore import Qt, QDate, QThread, Signal
+from PySide6.QtCore import Qt, QDate, QThread, Signal, QEvent, QTimer, QObject
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
     QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTextEdit, QCheckBox,
@@ -29,6 +29,20 @@ INDICATIONS = [
     "Positive Stress Test", "Pre-operative Evaluation",
     "Valve Disease Workup", "Routine Surveillance", "Other",
 ]
+
+
+class _SelectAllOnFocus(QObject):
+    """
+    Event filter for numeric spin boxes: selects the field's current value
+    as soon as it gains focus (click or Tab), so the next keystroke
+    overwrites the default "0" instead of requiring a manual select-all
+    first. Queued via QTimer.singleShot(0, ...) so it runs after the click
+    itself has placed the cursor, rather than being immediately undone by it.
+    """
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FocusIn:
+            QTimer.singleShot(0, obj.selectAll)
+        return False
 
 
 def _card() -> QFrame:
@@ -78,6 +92,7 @@ class PatientIntakePage(QWidget):
         super().__init__(parent)
         self._dicom_paths = []
         self._case_thread = None
+        self._select_all_filter = _SelectAllOnFocus(self)
         self._build_ui()
 
     # ── UI construction ────────────────────────────────────────────
@@ -139,16 +154,19 @@ class PatientIntakePage(QWidget):
         self.spin_age = QSpinBox()
         self.spin_age.setRange(0, 120)
         self.spin_age.setSuffix(" yrs")
+        self.spin_age.installEventFilter(self._select_all_filter)
         self.combo_gender = QComboBox()
         self.combo_gender.addItems(["Male", "Female", "Other"])
         self.spin_height = QDoubleSpinBox()
         self.spin_height.setRange(0, 250)
         self.spin_height.setSuffix(" cm")
         self.spin_height.setSpecialValueText("Not specified")
+        self.spin_height.installEventFilter(self._select_all_filter)
         self.spin_weight = QDoubleSpinBox()
         self.spin_weight.setRange(0, 300)
         self.spin_weight.setSuffix(" kg")
         self.spin_weight.setSpecialValueText("Not specified")
+        self.spin_weight.installEventFilter(self._select_all_filter)
 
         row = 0
         grid.addWidget(_field_label("Patient ID *"), row, 0)
@@ -240,6 +258,22 @@ class PatientIntakePage(QWidget):
             self.chk_risk_factors[name] = chk
             grid.addWidget(chk, i // cols, i % cols)
         v.addLayout(grid)
+
+        echo_row = QHBoxLayout()
+        self.chk_echo_done = QCheckBox("Echocardiogram Conducted")
+        self.chk_echo_done.toggled.connect(self._on_echo_toggled)
+        echo_row.addWidget(self.chk_echo_done)
+
+        echo_row.addWidget(_field_label("EF"))
+        self.spin_ef = QDoubleSpinBox()
+        self.spin_ef.setRange(0, 100)
+        self.spin_ef.setSuffix(" % EF")
+        self.spin_ef.setSpecialValueText("Not specified")
+        self.spin_ef.setEnabled(False)
+        self.spin_ef.installEventFilter(self._select_all_filter)
+        echo_row.addWidget(self.spin_ef)
+        echo_row.addStretch()
+        v.addLayout(echo_row)
 
         v.addWidget(_field_label("Additional Notes"))
         self.txt_notes = QTextEdit()
@@ -399,6 +433,8 @@ class PatientIntakePage(QWidget):
             "referring_physician": self.txt_referring.text().strip(),
             "indication": indication,
             "risk_factors": [name for name, chk in self.chk_risk_factors.items() if chk.isChecked()],
+            "echo_conducted": self.chk_echo_done.isChecked(),
+            "ef_percent": self.spin_ef.value() if self.chk_echo_done.isChecked() and self.spin_ef.value() > 0 else None,
             "notes": self.txt_notes.toPlainText().strip(),
         }
 
@@ -456,6 +492,11 @@ class PatientIntakePage(QWidget):
         self.btn_remove_dicom.setEnabled(not busy)
         self.progress_bar.setVisible(busy)
 
+    def _on_echo_toggled(self, checked: bool):
+        self.spin_ef.setEnabled(checked)
+        if not checked:
+            self.spin_ef.setValue(0)
+
     def _open_last_case_folder(self):
         case = getattr(self, "_last_case", None)
         if case is None:
@@ -480,6 +521,8 @@ class PatientIntakePage(QWidget):
         self.txt_indication_other.clear()
         for chk in self.chk_risk_factors.values():
             chk.setChecked(False)
+        self.chk_echo_done.setChecked(False)
+        self.spin_ef.setValue(0)
         self.txt_notes.clear()
         self._dicom_paths = []
         self.list_dicom.clear()

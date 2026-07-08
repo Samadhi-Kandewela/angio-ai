@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QScrollArea
+    QScrollArea, QMessageBox
 )
 
 import patient_store
@@ -162,6 +162,13 @@ class PatientRecordsPage(QWidget):
         self.btn_go_analysis.setEnabled(False)
         self.btn_go_analysis.clicked.connect(self._go_to_analysis)
         btn_row.addWidget(self.btn_go_analysis)
+
+        self.btn_delete = QPushButton("Delete Case")
+        self.btn_delete.setProperty("variant", "ghost")
+        self.btn_delete.setEnabled(False)
+        self.btn_delete.clicked.connect(self._delete_case)
+        btn_row.addWidget(self.btn_delete)
+
         btn_row.addStretch()
         v.addLayout(btn_row)
 
@@ -187,6 +194,7 @@ class PatientRecordsPage(QWidget):
         self.lbl_details.setText("Select a case above to see its full record.")
         self.btn_open_folder.setEnabled(False)
         self.btn_go_analysis.setEnabled(False)
+        self.btn_delete.setEnabled(False)
 
     def _current_case_id(self):
         row = self.table.currentRow()
@@ -202,6 +210,7 @@ class PatientRecordsPage(QWidget):
         self._show_details(case_id, metadata)
         self.btn_open_folder.setEnabled(True)
         self.btn_go_analysis.setEnabled(True)
+        self.btn_delete.setEnabled(True)
 
     def _show_details(self, case_id, metadata):
         risk_factors = metadata.get("risk_factors") or []
@@ -240,3 +249,21 @@ class PatientRecordsPage(QWidget):
         case_id = self._current_case_id()
         if case_id is not None:
             self.go_to_dicom_analysis.emit(case_id)
+
+    def _delete_case(self):
+        case_id = self._current_case_id()
+        if case_id is None:
+            return
+        case = self._cases[self.table.currentRow()]
+        label = case.get("full_name") or case.get("patient_id") or case_id
+        reply = QMessageBox.question(
+            self, "Delete Patient Case",
+            f"Permanently delete the case for {label}?\n\n"
+            "This removes its DICOM files, analysis results, ECG results, and generated "
+            "reports from disk. This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        patient_store.delete_case(case_id)
+        self.refresh()

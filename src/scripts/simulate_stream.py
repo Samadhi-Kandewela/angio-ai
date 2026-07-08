@@ -24,7 +24,7 @@ Features:
 import argparse
 import time
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import cv2
 
@@ -217,7 +217,7 @@ def main():
     # Configure the HTTP handler with our shared state
     MJPEGHandler.stream_state = state
 
-    server = HTTPServer(("0.0.0.0", args.port), MJPEGHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", args.port), MJPEGHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

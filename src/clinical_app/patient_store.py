@@ -166,6 +166,20 @@ def get_case_ecg_dir(case_id: str, root_dir: Optional[Path] = None) -> Path:
     return get_case_dir(case_id, root_dir) / "ecg_results"
 
 
+def delete_case(case_id: str, root_dir: Optional[Path] = None) -> None:
+    """
+    Permanently deletes a case: its whole folder on disk (metadata, DICOM
+    sources, analysis_results, ecg_results, generated reports) and its row in
+    the SQLite index. Irreversible -- callers should confirm with the user
+    first.
+    """
+    root = Path(root_dir) if root_dir else DEFAULT_PATIENT_DATA_ROOT
+    case_dir = get_case_dir(case_id, root)
+    if case_dir.exists():
+        shutil.rmtree(case_dir)
+    patient_db.delete_case(case_id, root_dir=root)
+
+
 def load_metadata(case_id: str, root_dir: Optional[Path] = None) -> dict:
     """Loads a case's saved metadata.json (patient/study info), e.g. for report title pages."""
     metadata_path = get_case_dir(case_id, root_dir) / "metadata.json"

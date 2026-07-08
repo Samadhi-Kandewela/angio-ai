@@ -25,7 +25,7 @@ from qca import QCAConfig
 from frame_pipeline import (
     preprocess_frame, segment_frame, run_localization_frame, clean_vessel_mask, run_qca_from_clean_mask,
 )
-from report_engine import draw_live_stenosis_overlay
+from report_engine import draw_live_stenosis_overlay, draw_lesion_markers_bgr, build_live_lesion_specs
 
 
 class DicomAnalysisThread(QThread):
@@ -156,6 +156,17 @@ class DicomAnalysisThread(QThread):
             else:
                 qca_vis_rgb = mask_overlay_rgb.copy()
                 info = "QCA: Insufficient mask data for analysis"
+
+            # Mark stenosis locations on the segmentation-mask frame too
+            # (same plain-circle style as the QCA panel) -- this is now the
+            # default-visible panel, so it should show where the lesions are
+            # without needing to also enable the optional QCA panel.
+            if lesions:
+                mask_overlay_bgr = cv2.cvtColor(mask_overlay_rgb, cv2.COLOR_RGB2BGR)
+                mask_overlay_bgr = draw_lesion_markers_bgr(
+                    mask_overlay_bgr, build_live_lesion_specs(lesions), show_labels=False
+                )
+                mask_overlay_rgb = cv2.cvtColor(mask_overlay_bgr, cv2.COLOR_BGR2RGB)
 
             latency_ms = (time.perf_counter() - t0) * 1000.0
             self.frame_ready.emit(

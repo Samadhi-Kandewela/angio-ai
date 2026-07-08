@@ -19,6 +19,7 @@ Differences from DicomAnalysisThread:
 """
 
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -33,6 +34,13 @@ from frame_pipeline import (
     run_qca_from_clean_mask,
 )
 from report_engine import draw_live_stenosis_overlay
+
+# How many of the most recently received raw frames to keep for "Save Results
+# & Generate View Report" -- a live stream is unbounded, so we can't hold
+# every frame ever seen; a sliding window of the most recent ones gives the
+# same whole-run QCA analysis (analyze_frame_list) a cine-loop-like clip to
+# work with, capturing whatever was just observed.
+CAPTURE_MAXLEN = 300
 
 
 class LiveStreamThread(QThread):
@@ -63,6 +71,17 @@ class LiveStreamThread(QThread):
 
         self._loc_class_map = None
         self._loc_confidence_map = None
+
+        self._captured_frames = deque(maxlen=CAPTURE_MAXLEN)
+
+    # ── Captured frames (for Save Results & Generate View Report) ──────
+
+    def get_captured_frames(self) -> list:
+        """Returns a snapshot (plain list) of the most recently received raw frames."""
+        return list(self._captured_frames)
+
+    def clear_captured_frames(self):
+        self._captured_frames.clear()
 
     # ── Control API (call from the UI thread) ──────────────────────────
 
@@ -116,6 +135,7 @@ class LiveStreamThread(QThread):
                     break
 
                 frame_number += 1
+                self._captured_frames.append(frame_bgr.copy())
 
                 if self.seg_model is None:
                     # No model loaded — still show the raw frame so the user

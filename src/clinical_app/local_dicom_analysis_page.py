@@ -15,8 +15,8 @@ import cv2
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap, QFont
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
-    QComboBox, QSlider, QPushButton, QFrame, QFileDialog, QListWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QComboBox, QSlider, QPushButton, QFrame, QListWidget,
     QListWidgetItem, QCheckBox, QMessageBox, QSizePolicy, QScrollArea
 )
 
@@ -25,7 +25,7 @@ import analysis_results_store
 from dicom_loader import discover_series, load_series_frames
 from dicom_analysis_thread import DicomAnalysisThread
 from frame_pipeline import SegmentationModel, LocalizationModel
-from report_engine import analyze_frame_list, draw_frame_stenosis_only
+from report_engine import KEY_FRAME_MAX_COUNT, analyze_frame_list, draw_frame_stenosis_only
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]  # angio-ai/
 DEFAULT_SEGMENTATION_MODEL_PATHS = [
@@ -150,6 +150,7 @@ class LocalDicomAnalysisPage(QWidget):
 
         self._build_ui()
         self.refresh_cases()
+        self._auto_load_models()
 
     # ── UI construction ────────────────────────────────────────────
     def _build_ui(self):
@@ -244,38 +245,9 @@ class LocalDicomAnalysisPage(QWidget):
         header.setProperty("role", "sectionHeader")
         v.addWidget(header)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setColumnStretch(1, 1)
-
-        grid.addWidget(_field_label("Segmentation Model"), 0, 0)
-        self.txt_seg_model = QLineEdit(_first_existing(DEFAULT_SEGMENTATION_MODEL_PATHS))
-        grid.addWidget(self.txt_seg_model, 0, 1)
-        self.btn_browse_seg = QPushButton("Browse...")
-        self.btn_browse_seg.setProperty("variant", "ghost")
-        self.btn_browse_seg.clicked.connect(self._browse_seg_model)
-        grid.addWidget(self.btn_browse_seg, 0, 2)
-
-        grid.addWidget(_field_label("Localization Model (optional)"), 1, 0)
-        self.txt_loc_model = QLineEdit(_first_existing(DEFAULT_LOCALIZATION_MODEL_PATHS))
-        grid.addWidget(self.txt_loc_model, 1, 1)
-        self.btn_browse_loc = QPushButton("Browse...")
-        self.btn_browse_loc.setProperty("variant", "ghost")
-        self.btn_browse_loc.clicked.connect(self._browse_loc_model)
-        grid.addWidget(self.btn_browse_loc, 1, 2)
-
-        v.addLayout(grid)
-
-        btn_row = QHBoxLayout()
-        self.btn_load_models = QPushButton("Load Models")
-        self.btn_load_models.setProperty("variant", "primary")
-        self.btn_load_models.clicked.connect(self._load_models)
-        btn_row.addWidget(self.btn_load_models)
-
-        self.lbl_model_status = QLabel("Models not loaded.")
+        self.lbl_model_status = QLabel("Loading AI models...")
         self.lbl_model_status.setProperty("role", "hint")
-        btn_row.addWidget(self.lbl_model_status, stretch=1)
-        v.addLayout(btn_row)
+        v.addWidget(self.lbl_model_status)
 
         return card
 
@@ -291,9 +263,9 @@ class LocalDicomAnalysisPage(QWidget):
         top_row.addWidget(header)
         top_row.addStretch()
 
-        self.chk_show_mask = QCheckBox("Show Segmentation Mask")
-        self.chk_show_mask.toggled.connect(self._on_toggle_mask)
-        top_row.addWidget(self.chk_show_mask)
+        self.chk_show_qca = QCheckBox("Show QCA Stenosis Analysis")
+        self.chk_show_qca.toggled.connect(self._on_toggle_qca)
+        top_row.addWidget(self.chk_show_qca)
         v.addLayout(top_row)
 
         panels = QHBoxLayout()
@@ -302,12 +274,12 @@ class LocalDicomAnalysisPage(QWidget):
         self.panel_original, self.label_original = self._build_image_panel("Original Frame")
         panels.addWidget(self.panel_original, stretch=1)
 
-        self.panel_qca, self.label_qca = self._build_image_panel("QCA Stenosis Analysis")
-        panels.addWidget(self.panel_qca, stretch=1)
-
         self.panel_mask, self.label_mask = self._build_image_panel("Segmentation Mask")
-        self.panel_mask.setVisible(False)
         panels.addWidget(self.panel_mask, stretch=1)
+
+        self.panel_qca, self.label_qca = self._build_image_panel("QCA Stenosis Analysis")
+        self.panel_qca.setVisible(False)
+        panels.addWidget(self.panel_qca, stretch=1)
 
         v.addLayout(panels, stretch=1)
 
@@ -331,7 +303,11 @@ class LocalDicomAnalysisPage(QWidget):
 
         label = QLabel("No frame loaded")
         label.setAlignment(Qt.AlignCenter)
-        label.setMinimumSize(520, 460)
+        # Small enough that all three panels (Original, Segmentation Mask, and
+        # the optional QCA Stenosis Analysis) still fit within the window at
+        # once when all are visible -- Expanding still lets them grow larger
+        # when there's room (e.g. only one or two panels shown).
+        label.setMinimumSize(300, 260)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         label.setStyleSheet("background-color: #0B0C0E; border-radius: 6px; color: #5C6067;")
         v.addWidget(label, stretch=1)
@@ -469,8 +445,8 @@ class LocalDicomAnalysisPage(QWidget):
 
         hint = QLabel(
             "Analyzed automatically once playback reaches the end of the series -- the smallest set "
-            "of frames that shows every reported stenosis at least once, picked by vessel "
-            "opacification quality, so every row in the findings table has real supporting "
+            f"of frames (up to {KEY_FRAME_MAX_COUNT}) that shows every significant stenosis at least "
+            "once, picked by vessel opacification quality, so every finding has real supporting "
             "evidence. Each picture shows only the original frame with a circle + short id (e.g. "
             "\"L1\") around its own stenosis -- no vessel mask or skeleton -- since these are this "
             "exact frame's own detections, always accurately placed."
@@ -653,9 +629,11 @@ class LocalDicomAnalysisPage(QWidget):
         self._current_key_frame_page = 0
         self._render_current_key_frame()
 
-        all_tracks = angle_result.tracks
-        if not all_tracks:
-            self.lbl_key_frame_coverage.setText("No stenosis found across this series.")
+        significant_tracks = [
+            t for t in angle_result.tracks if t.representative["severity"] in ("SEVERE", "SIGNIFICANT")
+        ]
+        if not significant_tracks:
+            self.lbl_key_frame_coverage.setText("No significant stenosis found across this series.")
             return
 
         track_of_lesion = {id(les): t for t in angle_result.tracks for les in t.detections}
@@ -666,19 +644,20 @@ class LocalDicomAnalysisPage(QWidget):
                 continue
             for les in rec.lesions:
                 t = track_of_lesion.get(id(les))
-                if t is not None:
+                if t is not None and t.representative["severity"] in ("SEVERE", "SIGNIFICANT"):
                     covered_ids.add(t.track_id)
 
-        n_total = len(all_tracks)
-        n_covered = len({t.track_id for t in all_tracks} & covered_ids)
+        n_total = len(significant_tracks)
+        n_covered = len({t.track_id for t in significant_tracks} & covered_ids)
         if n_covered >= n_total:
             self.lbl_key_frame_coverage.setText(
-                f"{len(angle_result.key_frame_indices)} key frame(s) found, covering all {n_total} finding(s)."
+                f"{len(angle_result.key_frame_indices)} key frame(s) found, covering all {n_total} significant finding(s)."
             )
         else:
             self.lbl_key_frame_coverage.setText(
                 f"{len(angle_result.key_frame_indices)} key frame(s) found, covering {n_covered}/{n_total} "
-                f"finding(s) -- some findings never co-occurred with others in a stored frame."
+                f"significant finding(s) -- some findings never co-occurred with others within the "
+                f"{KEY_FRAME_MAX_COUNT}-frame cap."
             )
 
     # ── Case / series selection ─────────────────────────────────────
@@ -776,20 +755,15 @@ class LocalDicomAnalysisPage(QWidget):
         QMessageBox.warning(self, "Series Load Failed", message)
 
     # ── Models ───────────────────────────────────────────────────────
-    def _browse_seg_model(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Segmentation Model", "", "Model Files (*.onnx *.pth)")
-        if path:
-            self.txt_seg_model.setText(path)
-
-    def _browse_loc_model(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Localization Model", "", "Model Files (*.onnx *.pth)")
-        if path:
-            self.txt_loc_model.setText(path)
-
-    def _load_models(self):
-        seg_path = self.txt_seg_model.text().strip()
+    def _auto_load_models(self):
+        """Loads the default segmentation/localization checkpoints on startup -- no
+        manual path entry or Browse dialog; this page always uses whichever
+        default checkpoint is found first (see DEFAULT_*_MODEL_PATHS)."""
+        seg_path = _first_existing(DEFAULT_SEGMENTATION_MODEL_PATHS)
         if not seg_path:
-            self.lbl_model_status.setText("Select a segmentation model first.")
+            self.lbl_model_status.setProperty("role", "statusError")
+            self.lbl_model_status.setText("No segmentation model checkpoint found.")
+            self._repolish(self.lbl_model_status)
             return
 
         try:
@@ -800,7 +774,7 @@ class LocalDicomAnalysisPage(QWidget):
             self._repolish(self.lbl_model_status)
             return
 
-        loc_path = self.txt_loc_model.text().strip()
+        loc_path = _first_existing(DEFAULT_LOCALIZATION_MODEL_PATHS)
         self.analysis_thread.loc_model = None
         if loc_path:
             try:
@@ -813,7 +787,7 @@ class LocalDicomAnalysisPage(QWidget):
 
         self.lbl_model_status.setProperty("role", "statusSuccess")
         msg = "Segmentation model loaded."
-        msg += " Localization model loaded." if loc_path else " No localization model (location will be unavailable)."
+        msg += " Localization model loaded." if loc_path else " No localization model found (location will be unavailable)."
         self.lbl_model_status.setText(msg)
         self._repolish(self.lbl_model_status)
 
@@ -822,8 +796,8 @@ class LocalDicomAnalysisPage(QWidget):
             self.analysis_thread.seek(self.slider_frame.value())
 
     # ── Viewer ───────────────────────────────────────────────────────
-    def _on_toggle_mask(self, checked: bool):
-        self.panel_mask.setVisible(checked)
+    def _on_toggle_qca(self, checked: bool):
+        self.panel_qca.setVisible(checked)
 
     def _on_frame_ready(self, original_rgb, mask_overlay_rgb, qca_vis_rgb, frame_idx, total_frames, latency_ms, info):
         w = self.label_original.width()

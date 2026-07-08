@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import List, Optional
 
 import cv2
+import matplotlib.pyplot as plt
 
 import pdf_report
-from qca import QCAConfig
+from qca import QCAConfig, build_lesion_figure
 from report_engine import AngleResult, draw_angle_summary_bgr, draw_frame_stenosis_only, generate_reasoning
 
 
@@ -53,6 +54,14 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
                                the final report can show the untouched
                                angiogram next to the AI-labeled one for
                                direct visual comparison.
+      - lesion_<id>_detail.png -- the 4-panel explainable figure (raw crop,
+                               centerline+diameter crop, width heatmap, local
+                               diameter profile in mm) for each lesion track's
+                               representative (highest-score/confidence)
+                               detection -- saved now, while the source frame/
+                               mask/distance-transform are still in memory, so
+                               the final cross-view report can embed it later
+                               without re-running analysis.
       - view_report.pdf     -- the per-view explainable report (crops,
                                heatmaps, diameter profiles, reasoning text),
                                via the existing multi-view PDF renderer
@@ -98,6 +107,16 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
     lesions_json = []
     for t in angle_result.tracks:
         rep = t.representative
+        detail_image = None
+        rec = angle_result.get_frame_record(rep["frame_idx"])
+        if rec is not None:
+            title = f"{t.track_id} — {angle_result.angle_label} — {t.label}"
+            fig = build_lesion_figure(rec.img_gray, rec.bw_mask, rec.dt, rep, cfg, title)
+            detail_name = f"lesion_{_sanitize(t.track_id)}_detail.png"
+            fig.savefig(view_dir / detail_name, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            detail_image = detail_name
+
         lesions_json.append({
             "track_id": t.track_id,
             "label": t.label,
@@ -113,6 +132,7 @@ def save_view_results(analysis_dir: Path, angle_result: AngleResult,
             "total_occlusion": bool(rep.get("total_occlusion")),
             "co_visible_in_summary_frame": t.track_id in co_visible_ids,
             "reasoning": generate_reasoning(t, cfg),
+            "detail_image": detail_image,
         })
 
     summary = {

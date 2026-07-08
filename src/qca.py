@@ -60,7 +60,12 @@ class QCAConfig:
 
     min_branch_len: int = 15                 # minimum branch length (skeleton px) to analyze
 
-    px_to_mm: Optional[float] = None         # set if you have calibration (mm per pixel)
+    # mm per pixel. Defaults to the JACIT consensus value for the standard
+    # catheter/isocenter technique (QCA_CAL.md: "recommended calibration
+    # factor for standard analysis software is 0.20 +/- 0.02 mm/pixel");
+    # override with a case-specific measurement (see calibrate_from_catheter)
+    # when one is available.
+    px_to_mm: Optional[float] = 0.20
     # JACIT-recommended calibration range for the standard catheter/isocenter
     # technique (QCA_CAL.md); used to sanity-check a supplied px_to_mm.
     px_to_mm_min: float = 0.18
@@ -1162,10 +1167,18 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
                         les: dict, cfg: QCAConfig, title: str,
                         heatmap: Optional[np.ndarray] = None) -> "plt.Figure":
     """
-    Builds the 4-panel explainable figure (raw cropped angiogram, the same
-    crop annotated with centerline/diameter markers, width heatmap, and the
-    localized diameter profile) for a single lesion. Returns an open
+    Builds the explainable figure for a single lesion. Returns an open
     matplotlib Figure — caller is responsible for saving/embedding and closing it.
+
+    Top row -- whole-frame context, so the crops below can be placed within
+    the full vessel tree at a glance:
+      - Full Frame - Raw Angiogram: the untouched frame.
+      - Full Frame - Vessel Mask + Stenosis Location: the same frame with the
+        vessel mask outline, a circle at this lesion's location, and a
+        rectangle marking the crop region shown in the bottom row.
+    Bottom row -- zoomed-in detail, cropped tight around the lesion: raw
+    crop, the same crop annotated with centerline/diameter markers, width
+    heatmap, and the localized diameter profile.
 
     `heatmap` may be passed in precomputed (BGR colormap of the full-frame
     distance transform) to avoid recomputing it per lesion when called in a loop
@@ -1211,35 +1224,60 @@ def build_lesion_figure(angio: np.ndarray, mask: np.ndarray, dt: np.ndarray,
     d_raw = np.array([2.0 * dt[y, x] for y, x in branch], dtype=np.float32)
     d_s = smooth_1d(d_raw, cfg.smooth_win)
 
-    fig = plt.figure(figsize=(18, 5))
+    unit = "mm" if cfg.px_to_mm else "px"
+    scale = cfg.px_to_mm if cfg.px_to_mm else 1.0
+    d_raw_disp = d_raw * scale
+    d_s_disp = d_s * scale
+    rvd_disp = les.get("RVD_mm") if les.get("RVD_mm") is not None else les["RVD_px"] * scale
+    mld_disp = les.get("MLD_mm") if les.get("MLD_mm") is not None else les["MLD_px"] * scale
 
-    ax0 = plt.subplot(1, 4, 1)
+    severity_color = _SEVERITY_BGR.get(les["severity"], _SEVERITY_BGR["MILD"])
+    full_marked = angio_bgr.copy()
+    full_contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(full_marked, full_contours, -1, (0, 255, 0), 1)
+    cv2.circle(full_marked, (x0, y0), 16, severity_color, 2)
+    cv2.rectangle(full_marked, (x1, y1), (x2 - 1, y2 - 1), severity_color, 1)
+
+    fig = plt.figure(figsize=(18, 10))
+    gs = fig.add_gridspec(2, 4, height_ratios=[1.15, 1])
+
+    ax_full_raw = fig.add_subplot(gs[0, 0:2])
+    ax_full_raw.imshow(cv2.cvtColor(angio_bgr, cv2.COLOR_BGR2RGB))
+    ax_full_raw.set_title("Full Frame — Raw Angiogram")
+    ax_full_raw.axis('off')
+
+    ax_full_marked = fig.add_subplot(gs[0, 2:4])
+    ax_full_marked.imshow(cv2.cvtColor(full_marked, cv2.COLOR_BGR2RGB))
+    ax_full_marked.set_title("Full Frame — Vessel Mask + Stenosis Location")
+    ax_full_marked.axis('off')
+
+    ax0 = fig.add_subplot(gs[1, 0])
     ax0.imshow(cv2.cvtColor(patch_raw, cv2.COLOR_BGR2RGB))
     ax0.set_title("Raw Angiogram")
     ax0.axis('off')
 
-    ax1 = plt.subplot(1, 4, 2)
+    ax1 = fig.add_subplot(gs[1, 1])
     ax1.imshow(cv2.cvtColor(patch_angio, cv2.COLOR_BGR2RGB))
     ax1.set_title("Lesion Angiogram (Centerline + Diameter)")
     ax1.axis('off')
 
-    ax2 = plt.subplot(1, 4, 3)
+    ax2 = fig.add_subplot(gs[1, 2])
     ax2.imshow(cv2.cvtColor(patch_blended, cv2.COLOR_BGR2RGB))
     ax2.set_title("Width Heatmap (Red=Wide, Blue=Narrow)")
     ax2.axis('off')
 
-    ax3 = plt.subplot(1, 4, 4)
-    region_raw = d_raw[disp_L:disp_R+1]
-    region_smooth = d_s[disp_L:disp_R+1]
+    ax3 = fig.add_subplot(gs[1, 3])
+    region_raw = d_raw_disp[disp_L:disp_R+1]
+    region_smooth = d_s_disp[disp_L:disp_R+1]
     x_axis = range(disp_L, disp_R+1)
 
     ax3.plot(x_axis, region_raw, alpha=0.4, color='gray', label="Raw DT Width")
     ax3.plot(x_axis, region_smooth, color='blue', label="Smoothed Width")
     ax3.axvspan(L, R, alpha=0.2, color="red", label="Stenosis Region")
-    ax3.axhline(les["RVD_px"], color='green', linestyle='--', label=f"RVD: {les['RVD_px']:.1f}px")
-    ax3.plot(m_idx, les["MLD_px"], 'rv', markersize=8, label=f"MLD: {les['MLD_px']:.1f}px")
+    ax3.axhline(rvd_disp, color='green', linestyle='--', label=f"RVD: {rvd_disp:.2f}{unit}")
+    ax3.plot(m_idx, mld_disp, 'rv', markersize=8, label=f"MLD: {mld_disp:.2f}{unit}")
     ax3.set_title("Local Diameter Profile")
-    ax3.set_ylabel("Diameter (pixels)")
+    ax3.set_ylabel(f"Diameter ({unit})")
     ax3.legend(fontsize=9)
 
     occ_str = " [TOTAL OCCLUSION]" if les.get("total_occlusion") else ""

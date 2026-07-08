@@ -124,6 +124,7 @@ class AppWindow(QMainWindow):
         self.statusBar().showMessage(f"Case created: {case.case_dir}")
         self.dicom_analysis_page.refresh_cases()
         self.ecg_analysis_page.refresh_cases()
+        self.live_stream_page.refresh_cases()
         self.patient_records_page.refresh()
 
     def _on_go_to_dicom_analysis(self, case_id: str):

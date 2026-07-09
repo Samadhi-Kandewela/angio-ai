@@ -450,9 +450,16 @@ class EcgAnalysisPage(QWidget):
 
     def _open_report(self):
         if self._last_report_dir and hasattr(os, "startfile"):
+            report_pdf = self._last_report_dir / "result_card.pdf"
             report_txt = self._last_report_dir / "diagnosis_report.txt"
             try:
-                os.startfile(report_txt if report_txt.exists() else self._last_report_dir)
+                os.startfile(
+                    report_pdf
+                    if report_pdf.exists()
+                    else report_txt
+                    if report_txt.exists()
+                    else self._last_report_dir
+                )
             except OSError:
                 pass
 

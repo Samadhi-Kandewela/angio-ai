@@ -820,9 +820,12 @@ def _save_result_card(ml_result: dict, diag: dict, results: list, out_dir: str):
 
     plt.tight_layout()
     out = os.path.join(out_dir, "result_card.png")
+    pdf_out = os.path.join(out_dir, "result_card.pdf")
     plt.savefig(out, dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.savefig(pdf_out, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close()
     print(f"  Card     -> {out}")
+    print(f"  PDF Card -> {pdf_out}")
 
 
 def _generate_impression(diag: dict, ml_result: dict) -> list:

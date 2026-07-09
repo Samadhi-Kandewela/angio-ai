@@ -231,6 +231,7 @@ plot_*.py
 /ECG/first_successful_implementation/
 /ECG/MI images/
 /ECG/papers/
+ECG_Angio
 
 # Reconstruction / intermediate debug folders
 /dicom_3d_connected/
@@ -263,3 +264,4 @@ rename_data_images.py
 my_3d_reconstruction*
 create_branch_mapping_images.py
 checkpoints/
+

@@ -34,7 +34,15 @@ import vtk
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 import patient_store
-from case_analysis_workflow import is_3d_ready, lesion_panel_path, lesions_3d_path, reconstruction_dir, reconstruction_obj
+from case_analysis_workflow import (
+    build_lesion_3d_metadata,
+    build_lesion_panel,
+    is_3d_ready,
+    lesion_panel_path,
+    lesions_3d_path,
+    reconstruction_dir,
+    reconstruction_obj,
+)
 
 
 def _card() -> QFrame:
@@ -64,6 +72,8 @@ class ThreeDViewerPage(QWidget):
         self.lesion_actors: list[vtk.vtkProp3D] = []
         self._lesion_id_to_actor_index: dict[str, int] = {}
         self.branch_surfaces: dict[int, dict] = {}
+        self.axes_actor: Optional[vtk.vtkAxesActor] = None
+        self.orientation_marker: Optional[vtk.vtkOrientationMarkerWidget] = None
 
         self._build_ui()
 
@@ -114,11 +124,12 @@ class ThreeDViewerPage(QWidget):
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
         self.interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
         self.interactor.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
+        self._setup_orientation_marker()
         view_layout.addWidget(self.vtk_widget)
         splitter.addWidget(view_card)
 
         side = _card()
-        side.setMinimumWidth(360)
+        side.setMinimumWidth(390)
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(16, 16, 16, 16)
         side_layout.setSpacing(10)
@@ -180,7 +191,7 @@ class ThreeDViewerPage(QWidget):
         ):
             column = QVBoxLayout()
             column.setSpacing(6)
-            thumb.setFixedSize(150, 150)
+            thumb.setFixedSize(165, 165)
             thumb.setAlignment(Qt.AlignCenter)
             thumb.setProperty("role", "hint")
             thumb.setText("Not available")
@@ -341,11 +352,42 @@ class ThreeDViewerPage(QWidget):
         layout.addWidget(bar)
         return bar, value
 
+    def _setup_orientation_marker(self):
+        axes = vtk.vtkAxesActor()
+        axes.SetTotalLength(1.2, 1.2, 1.2)
+        axes.SetShaftTypeToCylinder()
+        axes.SetCylinderRadius(0.04)
+        axes.SetConeRadius(0.22)
+        axes.SetSphereRadius(0.08)
+
+        label_colors = {
+            axes.GetXAxisCaptionActor2D(): (1.0, 0.35, 0.32),
+            axes.GetYAxisCaptionActor2D(): (0.65, 0.93, 0.35),
+            axes.GetZAxisCaptionActor2D(): (0.35, 0.62, 1.0),
+        }
+        for caption, color in label_colors.items():
+            text = caption.GetCaptionTextProperty()
+            text.SetColor(*color)
+            text.BoldOn()
+            text.SetFontSize(14)
+
+        marker = vtk.vtkOrientationMarkerWidget()
+        marker.SetOrientationMarker(axes)
+        marker.SetInteractor(self.interactor)
+        marker.SetViewport(0.02, 0.02, 0.18, 0.18)
+        marker.SetEnabled(1)
+        marker.InteractiveOff()
+
+        self.axes_actor = axes
+        self.orientation_marker = marker
+
     def load_case(self, case_id: str) -> bool:
         self.last_error = ""
         self.case_id = case_id
         obj_path = reconstruction_obj(case_id)
         package_path = lesions_3d_path(case_id)
+        if obj_path.exists():
+            self._refresh_stale_lesion_metadata(case_id)
         if not obj_path.exists() or not package_path.exists():
             self._clear_view()
             self.last_error = (
@@ -403,6 +445,33 @@ class ThreeDViewerPage(QWidget):
             self.lbl_status.setText(self.last_error)
             return False
 
+    def _refresh_stale_lesion_metadata(self, case_id: str):
+        package_path = lesions_3d_path(case_id)
+        panel_path = lesion_panel_path(case_id)
+
+        def _needs_refresh(path: Path, filter_key: str) -> bool:
+            if not path.exists():
+                return True
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return True
+            return "SIGNIFICANT" not in str(payload.get(filter_key, "")).upper()
+
+        if not (
+            _needs_refresh(package_path, "display_filter")
+            or _needs_refresh(panel_path, "severity_filter")
+        ):
+            return
+
+        try:
+            build_lesion_3d_metadata(case_id)
+            build_lesion_panel(case_id)
+        except Exception:
+            # The viewer can still load older metadata; this refresh only broadens
+            # the displayed lesion tiers when the source analysis files are present.
+            pass
+
     def _clear_view(self):
         self.package = {}
         self.pipeline_summary = {}
@@ -448,7 +517,7 @@ class ThreeDViewerPage(QWidget):
         """Builds the 3D lesion actors from lesions_3d.json (the definitive
         "what's drawn on the mesh" list). List-widget population is handled
         separately by _load_lesion_panel(), which shows the broader,
-        all-views MODERATE/SEVERE panel."""
+        all-views moderate-or-higher panel."""
         self.lesion_actors = []
         self._lesion_id_to_actor_index = {}
         lesions = self.package.get("lesions", [])
@@ -657,7 +726,7 @@ class ThreeDViewerPage(QWidget):
                 button.setEnabled(False)
                 button.setChecked(False)
                 continue
-            thumb.setPixmap(pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            thumb.setPixmap(pixmap.scaled(165, 165, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             thumb.setText("")
             button.setEnabled(has_angle)
             button.setChecked(False)

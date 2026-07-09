@@ -310,10 +310,9 @@ def _is_severe_lesion(lesion: dict) -> bool:
     return "severe" in severity or ds >= 70.0 or bool(lesion.get("total_occlusion"))
 
 
-def _is_moderate_or_severe_lesion(lesion: dict) -> bool:
-    """Panel-list filter: MODERATE and SEVERE tiers only (SIGNIFICANT is
-    intentionally excluded, per explicit product decision)."""
-    return str(lesion.get("severity", "")).upper() in {"MODERATE", "SEVERE"}
+def _is_3d_display_lesion(lesion: dict) -> bool:
+    """Lesions shown in the 3D viewer and side panel."""
+    return str(lesion.get("severity", "")).upper() in {"MODERATE", "SIGNIFICANT", "SEVERE"}
 
 
 def _radius_at_point(vertices: list[tuple[float, float, float]], point: list[float], k: int = 24) -> float:
@@ -347,12 +346,11 @@ def _lesions_3d_from_pipeline(recon_dir: Path, branch_vertices: dict[int, list[t
 
     lesions_3d = []
     for i, lesion in enumerate(raw_lesions):
-        # MODERATE+SEVERE, not _is_severe_lesion: matches the panel's own bar
-        # (_is_moderate_or_severe_lesion) so a lesion whose narrowing is
+        # Same severity tiers as the panel so a lesion whose narrowing is
         # correctly baked into the mesh (via smooth_junction_mesh.py's
         # report-authoritative correction) isn't then shown as "not in 3D"
-        # in the panel just because it's MODERATE rather than SEVERE.
-        if not _is_moderate_or_severe_lesion(lesion):
+        # in the panel because of a display-filter mismatch.
+        if not _is_3d_display_lesion(lesion):
             continue
         branch_id = int(lesion["branch_id"])
         position = lesion["position_3d"]
@@ -396,7 +394,7 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
     if pipeline_lesions is not None:
         lesions_3d = pipeline_lesions
         mapping_method = (
-            "severe lesions detected directly on their mesh branch during reconstruction "
+            "displayed lesions detected directly on their mesh branch during reconstruction "
             "(scripts/dicom_3d_pipeline.py QCA pass) -- position is the exact centerline point, "
             "no post-hoc branch matching"
         )
@@ -404,7 +402,7 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
         all_lesions = []
         for view in views:
             for lesion in view.get("lesions", []):
-                if _is_severe_lesion(lesion):
+                if _is_3d_display_lesion(lesion):
                     all_lesions.append((view, lesion))
 
         used_counts: dict[int, int] = {}
@@ -450,7 +448,7 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
                 "view_report": str(Path(view["_view_dir"]) / "view_report.pdf"),
             })
         mapping_method = (
-            "fallback: severe-only wall-surface lesion patches matched to a reconstructed branch "
+            "fallback: wall-surface lesion patches matched to a reconstructed branch "
             "by artery-label token overlap (no in-pipeline QCA lesion file was found)"
         )
 
@@ -459,12 +457,12 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
         "mesh_obj": str(obj_path),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "mapping_method": mapping_method,
-        "display_filter": "severe lesions only (severity contains SEVERE, DS_percent >= 70, or total occlusion)",
+        "display_filter": "MODERATE, SIGNIFICANT, and SEVERE stenosis tiers",
         "views_used": [
             {
                 "view_label": v.get("view_label", "View"),
                 "n_frames_analyzed": v.get("n_frames_analyzed"),
-                "lesion_count": sum(1 for lesion in v.get("lesions", []) if _is_severe_lesion(lesion)),
+                "lesion_count": sum(1 for lesion in v.get("lesions", []) if _is_3d_display_lesion(lesion)),
                 "view_report": str(Path(v["_view_dir"]) / "view_report.pdf"),
             }
             for v in views
@@ -479,7 +477,7 @@ def build_lesion_3d_metadata(case_id: str) -> Path:
 
 
 def build_lesion_panel(case_id: str) -> Path:
-    """Lists every MODERATE/SEVERE stenosis across ALL analyzed views for the
+    """Lists every moderate-or-higher stenosis across ALL analyzed views for the
     case (not just the two used for reconstruction), tagging each with
     whether it's actually represented in the 3D mesh (`lesions_3d.json`) so
     the viewer can show the rest as present-but-inactive instead of
@@ -550,7 +548,7 @@ def build_lesion_panel(case_id: str) -> Path:
         view_label = view.get("view_label", "View")
         is_reconstruction_view = view_label in reconstruction_view_labels
         for lesion in view.get("lesions", []):
-            if not _is_moderate_or_severe_lesion(lesion):
+            if not _is_3d_display_lesion(lesion):
                 continue
             matched = claim(view_label, lesion) if is_reconstruction_view else None
             entries.append(entry_from_2d(view_label, lesion, view.get("_view_dir"), matched))
@@ -583,7 +581,7 @@ def build_lesion_panel(case_id: str) -> Path:
     payload = {
         "case_id": case_id,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "severity_filter": "MODERATE and SEVERE tiers only",
+        "severity_filter": "MODERATE, SIGNIFICANT, and SEVERE tiers",
         "entries": entries,
     }
     out_path = lesion_panel_path(case_id)

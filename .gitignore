@@ -184,8 +184,8 @@ exports/
 *.onnx.data
 
 # Large generated figures
-*.png
 figures/
+media/
 
 # Local text outputs / Logs
 _*.txt
@@ -194,8 +194,7 @@ _*.txt
 .DS_Store
 Thumbs.db
 
-# Markdown files
-*.md
+
 
 # Image/Figure generation scripts
 create_architecture_diagram.py

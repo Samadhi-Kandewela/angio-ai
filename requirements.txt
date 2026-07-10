@@ -9,6 +9,7 @@ onnxruntime
 imageio
 pillow
 PyQt5
+PySide6
 vtk
 albumentations
 matplotlib

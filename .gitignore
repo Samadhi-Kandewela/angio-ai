@@ -11,6 +11,10 @@ checkpoints/
 *.onnx
 
 #3d middle folders/
+new_dicom_auto_selection/
+new_dicom_epipolar_optimized/
+new_dicom_pipeline_output/
+new_dicom_smoothed_confidence/
 paper_text_extracts/
 raw_images/
 create_raw_images.py

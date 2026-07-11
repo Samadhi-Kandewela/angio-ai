@@ -730,7 +730,7 @@ def _save_result_card(ml_result: dict, diag: dict, results: list, out_dir: str):
     mean_hr = round(float(np.mean(hr_vals)), 1) if hr_vals else float("nan")
 
     fig = plt.figure(figsize=(13, 5), facecolor="#0d1b2a")
-    gs  = fig.add_gridspec(1, 3, wspace=0.35)
+    gs  = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.4, 0.9], wspace=0.35)
 
     # ── ML probability bars ──────────────────────────────────────────────────
     ax1 = fig.add_subplot(gs[0])
@@ -760,10 +760,15 @@ def _save_result_card(ml_result: dict, diag: dict, results: list, out_dir: str):
     ax2.axis("off")
     ax2.set_title("Clinical Analysis", color="white", fontsize=11)
 
+    import textwrap
     findings_text = ""
     if diag and "findings" in diag:
         for f in diag["findings"][:8]:
-            findings_text += f"  • {f}\n"
+            wrapped_lines = textwrap.wrap(f, width=42)
+            if wrapped_lines:
+                findings_text += f"  • {wrapped_lines[0]}\n"
+                for wl in wrapped_lines[1:]:
+                    findings_text += f"    {wl}\n"
     else:
         findings_text = "  (ECGDiagnoser not available)"
 

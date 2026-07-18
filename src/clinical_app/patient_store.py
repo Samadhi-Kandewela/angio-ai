@@ -93,9 +93,17 @@ def create_patient_case(metadata: dict, dicom_paths: List[str],
     root.mkdir(parents=True, exist_ok=True)
 
     patient_id = _sanitize(str(metadata.get("patient_id", "")))
+    patient_name = _sanitize(str(metadata.get("full_name", "")))
     study_date = _sanitize(str(metadata.get("study_date", "")))
+
+    # Build folder name with patient ID, name, and study date
     if patient_id != "unknown":
-        base_name = f"{patient_id}_{study_date}" if study_date != "unknown" else patient_id
+        if patient_name != "unknown":
+            # Format: {patient_id}_{patient_name}_{study_date}
+            base_name = f"{patient_id}_{patient_name}_{study_date}" if study_date != "unknown" else f"{patient_id}_{patient_name}"
+        else:
+            # Fallback if name not available: {patient_id}_{study_date}
+            base_name = f"{patient_id}_{study_date}" if study_date != "unknown" else patient_id
     else:
         base_name = f"case_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

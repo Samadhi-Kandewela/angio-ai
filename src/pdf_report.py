@@ -168,8 +168,7 @@ def _add_patient_details_findings_page(pdf, patient_info: Dict[str, str], view_s
             worst_vs, worst_les = items[0]
             color = _SEVERITY_RGB_MPL.get(worst_les["severity"], "black")
             summary = (
-                f"{len(items)} finding(s) — worst: {worst_les['severity']} "
-                f"({worst_les['DS_percent']:.0f}% DS) in {worst_les['label']} ({worst_vs['view_label']})"
+                f"{worst_les['severity']} ({worst_les['DS_percent']:.0f}% DS) in {worst_les['label']} ({worst_vs['view_label']})"
             )
             for wrapped in textwrap.wrap(summary, width=62):
                 ax.text(0.24, y, wrapped, transform=ax.transAxes, fontsize=10, va="top", color=color)
@@ -178,7 +177,7 @@ def _add_patient_details_findings_page(pdf, patient_info: Dict[str, str], view_s
 
     if other:
         y -= 0.02
-        ax.text(0, y, f"Other findings ({len(other)}): not localized to a main branch "
+        ax.text(0, y, f"Additional lesions ({len(other)}): not localized to a main branch "
                        "(side-branch or no anatomical localization available).",
                 transform=ax.transAxes, fontsize=9, style="italic", va="top", color="#555555")
 

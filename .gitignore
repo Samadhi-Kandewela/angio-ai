@@ -184,7 +184,7 @@ exports/
 *.onnx.data
 
 # Large generated figures
-*.png
+# *.png
 figures/
 
 # Local text outputs / Logs
@@ -268,4 +268,24 @@ rename_data_images.py
 my_3d_reconstruction*
 create_branch_mapping_images.py
 checkpoints/
+
+create_architecture_pptx.py
+create_professional_pptx.py
+Angio-AI_Architecture_Professional.pptx
+architecture_diagram_professional.html
+PATIENT_NAMING_IMPLEMENTATION.txt
+README_INTEGRATION.txt
+render_professional_diagram.py
+Architecture_Diagram.pptx
+architecture_diagram.svg
+test_calibration_impact.py
+test_patient_folder_naming.py
+THRESHOLD_DECISION_FLOWCHART.txt
+THRESHOLD_DECISION_MATRIX.txt
+THRESHOLD_GUIDE_SUMMARY.txt
+threshold_optimization_guide.py
+Angio-AI_Architecture_Professional.png
+architecture_diagram.png
+
+presentation_assets/
 

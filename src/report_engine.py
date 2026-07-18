@@ -22,6 +22,7 @@ from frame_pipeline import (
     preprocess_frame, segment_frame, run_localization_frame, run_qca_frame,
 )
 from localization_labels import SYNTAX_SEGMENTS, remap_segment_id, MERGED_SEGMENT_LABELS
+from stenosis_improvements import get_confidence_threshold, apply_stenosis_calibration
 
 # Offline analysis can afford to run localization more often than the live
 # preview (frame_pipeline / VideoThread use interval=15 to hold real-time FPS).
@@ -73,17 +74,6 @@ class FrameRecord:
     lesions: list  # lesion dicts, each carries a "frame_idx" key
 
 
-# Absolute confidence floor (on the qca.py detect_lesions_on_branch scale --
-# a 0.5/0.3/0.2-weighted composite of edge sharpness, reference-segment
-# quality, and lesion-span stability, roughly in [0, 1]) a detection must
-# clear to be eligible as a track's representative measurement. Chosen well
-# below what a normally-measured frame scores (typically ~0.5-0.9 in
-# practice) but clearly above a noisy/degenerate reading, so it excludes
-# only genuine outliers rather than any frame merely less confident than the
-# track's single best one -- see _pick_representative.
-REPRESENTATIVE_CONFIDENCE_FLOOR = 0.4
-
-
 def _pick_representative(detections: list) -> dict:
     """
     Picks the one detection used everywhere as a lesion track's reported
@@ -94,16 +84,45 @@ def _pick_representative(detections: list) -> dict:
     severity, so the cleanest-measured frame can catch the vessel at a less-
     narrowed point in the cardiac cycle than a slightly-less-confident frame
     did -- picking by confidence alone can then under-report a lesion's true
-    worst reading. Detections below REPRESENTATIVE_CONFIDENCE_FLOOR are
-    excluded so a noisy, low-confidence outlier can't win purely by reading
-    falsely severe; if every detection falls below it (a weakly-measured
-    track throughout), the least-unreliable one is used rather than
-    reporting nothing.
+    worst reading.
+
+    Uses severity-stratified confidence thresholds (from stenosis_improvements):
+    - SEVERE (DS>=70%): threshold=0.4 (prioritizes sensitivity, catches all disease)
+    - SIGNIFICANT (DS>=50%): threshold=0.5
+    - MODERATE (DS>=30%): threshold=0.6
+    - MILD (DS<30%): threshold=0.7 (higher specificity for low-severity)
+
+    If every detection falls below its severity's threshold, the least-unreliable one
+    is used rather than reporting nothing. After selection, applies calibration factor
+    to optimize final DS% reporting.
     """
-    eligible = [d for d in detections if d.get("confidence", 0.0) >= REPRESENTATIVE_CONFIDENCE_FLOOR]
+    if not detections:
+        return {}
+
+    # First pass: get the most severe reading to determine severity-based threshold
+    max_ds_reading = max(detections, key=lambda d: d["DS_percent"])
+    threshold = get_confidence_threshold(max_ds_reading["DS_percent"])
+
+    # Second pass: filter by severity-based confidence threshold
+    eligible = [d for d in detections if d.get("confidence", 0.0) >= threshold]
     if not eligible:
+        # Fallback: use highest-confidence detection if none meet threshold
         eligible = [max(detections, key=lambda d: d.get("confidence", 0.0))]
-    return max(eligible, key=lambda d: d["DS_percent"])
+
+    # Select the most severe among eligible readings
+    representative = max(eligible, key=lambda d: d["DS_percent"])
+
+    # Apply calibration factor for high-grade stenosis (DS% >= 70%)
+    original_ds = representative.get("DS_percent", 0)
+    calibrated_ds = apply_stenosis_calibration(original_ds)
+
+    # Create a copy with calibrated DS_percent to avoid modifying original
+    result = representative.copy()
+    result["DS_percent"] = calibrated_ds
+    result["_original_ds_percent"] = original_ds  # Store original for reference
+    result["_confidence_threshold"] = threshold  # Store applied threshold for debugging
+
+    return result
 
 
 @dataclass

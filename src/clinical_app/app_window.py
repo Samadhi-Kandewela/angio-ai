@@ -1,11 +1,12 @@
 """Main window shell: a left navigation rail plus a stacked content area."""
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QStackedWidget, QFrame, QMessageBox, QApplication
+    QListWidget, QListWidgetItem, QStackedWidget, QFrame,
+    QMessageBox, QApplication, QPushButton
 )
 
 from patient_intake_page import PatientIntakePage
@@ -39,8 +40,11 @@ NAV_3D_VIEWER = 5
 
 
 class AppWindow(QMainWindow):
-    def __init__(self):
+    logout_requested = Signal()   # emitted when the user clicks Logout
+
+    def __init__(self, current_user: dict | None = None):
         super().__init__()
+        self._current_user = current_user or {}
         self.setWindowTitle("Cardexa Clinical Dashboard")
         if LOGO_ICO.exists():
             self.setWindowIcon(QIcon(str(LOGO_ICO)))
@@ -135,7 +139,45 @@ class AppWindow(QMainWindow):
             self.nav_list.addItem(item)
         self.nav_list.setCurrentRow(0)
         layout.addWidget(self.nav_list)
-        layout.addStretch()
+        layout.addSpacing(16)
+
+        # ── Logged-in user card ──────────────────────────────────────────────
+        user_card = QFrame()
+        user_card.setProperty("card", "true")
+        user_card.setStyleSheet(
+            "QFrame[card='true'] { border-radius: 8px; padding: 2px; }"
+        )
+        user_layout = QVBoxLayout(user_card)
+        user_layout.setContentsMargins(12, 10, 12, 10)
+        user_layout.setSpacing(4)
+
+        full_name = self._current_user.get("full_name", "Unknown User")
+        spec      = self._current_user.get("specialisation") or "Cardiologist"
+        username  = self._current_user.get("username", "")
+
+        name_lbl = QLabel(full_name)
+        name_lbl.setProperty("role", "detailText")
+        name_lbl.setWordWrap(True)
+
+        spec_lbl = QLabel(spec)
+        spec_lbl.setProperty("role", "captionText")
+
+        user_lbl = QLabel(f"@{username}")
+        user_lbl.setProperty("role", "hint")
+
+        logout_btn = QPushButton("Logout")
+        logout_btn.setProperty("variant", "ghost")
+        logout_btn.setMinimumHeight(34)
+        logout_btn.clicked.connect(self._on_logout)
+
+        user_layout.addWidget(name_lbl)
+        user_layout.addWidget(spec_lbl)
+        user_layout.addWidget(user_lbl)
+        user_layout.addSpacing(6)
+        user_layout.addWidget(logout_btn)
+
+        layout.addWidget(user_card)
+        layout.addSpacing(8)
 
         return sidebar
 
@@ -177,3 +219,8 @@ class AppWindow(QMainWindow):
         self.ecg_analysis_page.shutdown()
         self.live_stream_page.shutdown()
         event.accept()
+
+    def _on_logout(self):
+        """Close the main window and signal that the auth dialog should re-open."""
+        self.logout_requested.emit()
+        self.close()

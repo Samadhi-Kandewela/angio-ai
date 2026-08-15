@@ -16,6 +16,9 @@ Uses Python's built-in sqlite3 -- no new dependency.
 """
 from __future__ import annotations
 
+import hashlib
+import secrets
+
 import json
 import sqlite3
 from pathlib import Path
@@ -42,6 +45,15 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE INDEX IF NOT EXISTS idx_cases_patient_id ON cases(patient_id);
 CREATE INDEX IF NOT EXISTS idx_cases_full_name ON cases(full_name);
 CREATE INDEX IF NOT EXISTS idx_cases_created_at ON cases(created_at);
+
+CREATE TABLE IF NOT EXISTS users (
+    username        TEXT PRIMARY KEY,
+    full_name       TEXT NOT NULL,
+    specialisation  TEXT,
+    hashed_password TEXT NOT NULL,
+    salt            TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
 """
 
 
@@ -177,3 +189,106 @@ def rebuild_from_disk(root_dir: Optional[Path] = None) -> int:
                 )
                 count += 1
     return count
+
+
+# =============================================================================
+# Auth helpers
+# =============================================================================
+
+def _hash_password(password: str, salt: str) -> str:
+    """Return a hex SHA-256 digest of (salt + password)."""
+    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+
+
+def register_user(
+    username: str,
+    full_name: str,
+    password: str,
+    specialisation: str = "",
+    root_dir: Optional[Path] = None,
+) -> dict:
+    """
+    Creates a new cardiologist account.  Returns the new user dict.
+    Raises ValueError if the username is already taken or any required
+    field is blank.
+    """
+    username = username.strip()
+    full_name = full_name.strip()
+    if not username:
+        raise ValueError("Username cannot be empty.")
+    if not full_name:
+        raise ValueError("Full name cannot be empty.")
+    if not password:
+        raise ValueError("Password cannot be empty.")
+
+    import datetime
+    salt = secrets.token_hex(16)
+    hashed = _hash_password(password, salt)
+    created_at = datetime.datetime.utcnow().isoformat()
+
+    with _connect(root_dir) as conn:
+        conn.executescript(_SCHEMA)  # ensure table exists
+        try:
+            conn.execute(
+                """
+                INSERT INTO users (username, full_name, specialisation,
+                                   hashed_password, salt, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (username, full_name, specialisation.strip(), hashed, salt, created_at),
+            )
+        except sqlite3.IntegrityError:
+            raise ValueError(f"Username '{username}' is already registered.")
+
+    return {
+        "username": username,
+        "full_name": full_name,
+        "specialisation": specialisation.strip(),
+        "created_at": created_at,
+    }
+
+
+def verify_user(
+    username: str,
+    password: str,
+    root_dir: Optional[Path] = None,
+) -> Optional[dict]:
+    """
+    Checks credentials. Returns a user info dict (without password fields)
+    on success, or None on failure (wrong username or password).
+    """
+    username = username.strip()
+    with _connect(root_dir) as conn:
+        conn.executescript(_SCHEMA)
+        cur = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+            (username,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+    row = dict(row)
+    expected = _hash_password(password, row["salt"])
+    if not secrets.compare_digest(expected, row["hashed_password"]):
+        return None
+
+    return {
+        "username": row["username"],
+        "full_name": row["full_name"],
+        "specialisation": row["specialisation"],
+        "created_at": row["created_at"],
+    }
+
+
+def get_user(username: str, root_dir: Optional[Path] = None) -> Optional[dict]:
+    """Returns a user's public info dict, or None if not found."""
+    with _connect(root_dir) as conn:
+        conn.executescript(_SCHEMA)
+        cur = conn.execute(
+            "SELECT username, full_name, specialisation, created_at "
+            "FROM users WHERE username = ? COLLATE NOCASE",
+            (username.strip(),),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None

@@ -139,7 +139,7 @@ class AppWindow(QMainWindow):
             self.nav_list.addItem(item)
         self.nav_list.setCurrentRow(0)
         layout.addWidget(self.nav_list)
-        layout.addStretch()
+        layout.addSpacing(16)
 
         # ── Logged-in user card ──────────────────────────────────────────────
         user_card = QFrame()
